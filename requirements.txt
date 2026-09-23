@@ -1,0 +1,12 @@
+# Phase 0 — ядро (раздел 14)
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+xgboost>=2.0
+optuna>=3.4
+statsmodels>=0.14
+pyarrow>=14
+PyYAML>=6.0
+
+# Отчёт (раздел 3.12)
+matplotlib>=3.7

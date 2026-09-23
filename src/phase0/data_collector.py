@@ -127,14 +127,17 @@ if __name__ == "__main__":
                   else pd.Timestamp.now(tz="UTC")).timestamp() * 1000)
 
     root = Path(args.outdir)
-    sym = args.symbol
+    # нормализуем символ: "SOLUSDT" -> "SOL_USDT" (раньше выходило "SOLUSDT_USDT")
+    base = args.symbol[:-5] if args.symbol.upper().endswith("USDT") else args.symbol
+    sym = f"{base}_USDT"
+    bybit_sym = args.symbol.upper()
 
-    print(f"[1/2] Клайны {sym} interval={args.interval} с {args.start}")
-    kl = fetch_klines(sym, args.interval, start_ms, end_ms)
+    print(f"[1/2] Клайны {bybit_sym} interval={args.interval} с {args.start}")
+    kl = fetch_klines(bybit_sym, args.interval, start_ms, end_ms)
     tf_dir = {"60": "1h", "240": "4h", "D": "1d"}.get(args.interval, args.interval)
-    save_parquet(kl, root / "historical/bybit" / f"{sym}_USDT" / tf_dir / "klines.parquet")
+    save_parquet(kl, root / "historical/bybit" / sym / tf_dir / "klines.parquet")
 
-    print(f"[2/2] Funding {sym}")
-    fr = fetch_funding(sym, start_ms, end_ms)
-    save_parquet(fr, root / "funding_rates" / f"{sym}_USDT" / "funding_history.parquet")
+    print(f"[2/2] Funding {bybit_sym}")
+    fr = fetch_funding(bybit_sym, start_ms, end_ms)
+    save_parquet(fr, root / "funding_rates" / sym / "funding_history.parquet")
     print("Готово.")

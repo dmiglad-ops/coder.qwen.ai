@@ -9,3 +9,10 @@ logs/
 
 # Data artifacts (large binary files)
 data/**/*.parquet
+
+# Артефакты прогонов/моделей/состояние
+backtests/
+models/
+reports/
+state/
+*.html

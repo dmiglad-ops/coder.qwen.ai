@@ -11,3 +11,19 @@
   3) при GO — Phase 1: ансамбль, калибровка, ATR SL/TP, мульти-актив BTC/ETH (данные уже собраны);
   4) заморозить OOS_FINAL (freeze_oos_final) и НЕ трогать до конца Phase 2.
 ОГРАНИЧЕНИЯ СРЕДЫ: n_trials уменьшен с 100 до 40 (песочница); на целевом железе — 100+.
+
+[2026-09-24] Доработка Phase 0 по результатам аудита против ТЗ (дефекты → правки).
+- КОНФИГ: создан config.py (YAML-лоадер, deep-merge поверх DEFAULTS); system.yaml больше не мёртвый.
+- ШКАЛА SHARPE: все решения — per-bar (sharpe_per_bar, 8760); Buy&Hold тоже считается на часовых барах (была несопоставимость √365/√8760).
+- СТАТИСТИКА: newey_west maxlags 5→24, block_bootstrap block_size 10→24 (выровнено на forward_period).
+- БЭКТЕСТ: ATR-выход 2×ATR внутри holding=24 (совпадает с метками 3.5); funding_paid на сделку (сторона × mean_fr × n_settle/3); анализ по сторонам funding_by_side.
+- BENCHMARKS: B2/B3 симулируются тем же движком (holding, atr_target, funding) — честное сравнение; n_runs из конфига (150 песочница / 1000 целевое).
+- KILL CRITERIA: добавлены IR > 0.5 (info_ratio модели vs B&H, per-bar) и no_dominant_feature (gain ≤ 0.90).
+- ВОСПРОИЗВОДИМОСТЬ: random_state=42 в make_model; early_stopping_rounds=50.
+- OOS_GUARD: даты OOS_FINAL параметризованы (oos_start/oos_end из конфига), защита сохранена.
+- DATA_COLLECTOR: имя папки симпла нормализовано (SOLUSDT_USDT → SOL_USDT).
+- REPORT: создан report.py — HTML-отчёт (раздел 3.12), таблица фандинга по сторонам, графики (matplotlib optional, base64).
+- requirements.txt добавлен; .gitignore — backtests/models/reports/state.
+- ПРОВЕРЕНО: py_compile всех 8 модулей; smoke-тест ядра бэктеста/бенчмарков на синтетике; загрузка конфига; генерация HTML.
+СЛЕДУЮЩИЕ ШАГИ: 1) pip install -r requirements.txt на целевом железе; 2) run_phase0.py --quick → report.py;
+  3) полный прогон (Optuna 40+) → вердикт GO/NO-GO из logs/phase0_run.log; 4) при GO — Phase 1.

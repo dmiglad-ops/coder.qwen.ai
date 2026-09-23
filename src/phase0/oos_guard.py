@@ -25,9 +25,13 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def freeze_oos_final(dataset: pd.DataFrame, out_path: Path) -> None:
+def freeze_oos_final(dataset: pd.DataFrame, out_path: Path,
+                     oos_start: pd.Timestamp | None = None,
+                     oos_end: pd.Timestamp | None = None) -> None:
     """Вырежьте и заморозьте OOS_FINAL ОДИН РАЗ; запись chmod 400 + хеш в файл."""
-    part = dataset[(dataset["timestamp"] >= OOS_FINAL_START) & (dataset["timestamp"] < OOS_FINAL_END)]
+    lo = oos_start if oos_start is not None else OOS_FINAL_START
+    hi = oos_end if oos_end is not None else OOS_FINAL_END
+    part = dataset[(dataset["timestamp"] >= lo) & (dataset["timestamp"] < hi)]
     out_path.parent.mkdir(parents=True, exist_ok=True)
     part.to_parquet(out_path, index=False)
     os.chmod(out_path, 0o400)
@@ -51,7 +55,9 @@ def verify_hashes() -> bool:
     return ok
 
 
-def guard_split(name: str, allow_final_oos: bool = False) -> None:
+def guard_split(name: str, allow_final_oos: bool = False,
+                oos_start: pd.Timestamp | None = None,
+                oos_end: pd.Timestamp | None = None) -> None:
     """Запрет доступа к OOS_FINAL без явного флага (защита от случайного подглядывания)."""
     if name.upper() in ("OOS_FINAL", "OOS-FINAL", "FINAL") and not allow_final_oos:
         raise PermissionError(
@@ -61,8 +67,12 @@ def guard_split(name: str, allow_final_oos: bool = False) -> None:
 
 
 def assert_no_final_overlap(index: pd.DatetimeIndex, split: str,
-                            allow_final_oos: bool = False) -> None:
+                            allow_final_oos: bool = False,
+                            oos_start: pd.Timestamp | None = None,
+                            oos_end: pd.Timestamp | None = None) -> None:
     """Проверка, что запрос данных не пересекается с замороженным периодом."""
+    lo0 = oos_start if oos_start is not None else OOS_FINAL_START
+    hi0 = oos_end if oos_end is not None else OOS_FINAL_END
     if allow_final_oos:
         return
     if len(index) == 0:
@@ -73,10 +83,10 @@ def assert_no_final_overlap(index: pd.DatetimeIndex, split: str,
         lo, hi = lo.tz_localize("UTC"), hi.tz_localize("UTC")
     else:
         lo, hi = lo.tz_convert("UTC"), hi.tz_convert("UTC")
-    overlaps = not (hi < OOS_FINAL_START or lo >= OOS_FINAL_END)
+    overlaps = not (hi < lo0 or lo >= hi0)
     if overlaps and split.upper() != "OOS_FINAL":
         # данные перекрывают финальный OOS — обрезаем, чтобы скрипт случайно не обучился на нём
         raise ValueError(
             f"Сплит '{split}' пересекается с замороженным OOS_FINAL "
-            f"({lo} .. {hi}). Обрежьте данные до {OOS_FINAL_START}."
+            f"({lo} .. {hi}). Обрежьте данные до {lo0}."
         )

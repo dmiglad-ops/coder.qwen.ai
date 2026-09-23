@@ -31,7 +31,9 @@ costs:                        # раздел 0.2
 
 backtest:                     # разделы 3.8–3.9
   embargo_bars: 72
-  max_holding_bars: 48        # time-based exit 48ч
+  holding_bars: 24            # выход по времени (Phase 0 = label horizon)
+  atr_exit: true              # ранний выход при пробое 2×ATR (совпадает с метками 3.5)
+  atr_multiplier: 2.0
   non_overlapping: true       # 1 позиция на пару
 
 model:                        # раздел 3.6
