@@ -1,0 +1,127 @@
+crypto-trading-system/
+│
+├── config/                          # Конфигурация системы
+│   ├── symbols.yaml                 # Список торгуемых монет (BTC, ETH, SOL...)
+│   ├── timeframes.yaml              # Таймфреймы (5m, 15m, 1h, 4h)
+│   ├── risk_management.yaml         # Лимиты риска, размер позиции
+│   └── exchange.yaml                # API ключи биржи, комиссии
+│
+├── data/                            # Данные и пайплайны
+│   ├── collectors/                  # Сбор данных с биржи
+│   │   ├── candle_collector.py      # Свечи OHLCV
+│   │   ├── orderbook_collector.py   # Стакан (bid/ask)
+│   │   ├── funding_collector.py     # Funding rates
+│   │   └── open_interest_collector.py
+│   │
+│   ├── storage/                     # Хранение данных
+│   │   ├── historical/              # Исторические данные (Parquet/SQLite)
+│   │   └── realtime/                # Реалтайм буфер
+│   │
+│   └── preprocessing/               # Подготовка фичей
+│       ├── indicators/              # Расчет индикаторов
+│       │   ├── trend.py             # EMA, MACD, ADX, SMA
+│       │   ├── oscillators.py       # RSI, Stochastic, CCI
+│       │   ├── volume.py            # OBV, VWAP, Volume Ratio
+│       │   └── market.py            # Funding, OI, Long/Short
+│       │
+│       ├── feature_engineering.py   # Нормализация, масштабирование
+│       └── dataset_builder.py       # Создание датасетов для обучения
+│
+├── models/                          # Обученные модели
+│   ├── specialists/                 # Специализированные Laya
+│   │   ├── laya_trend/              # Отдел Тренда
+│   │   │   ├── model.pt
+│   │   │   ├── config.yaml          # Какие фичи использует
+│   │   │   └── metrics.json         # Точность, Sharpe на бэктесте
+│   │   │
+│   │   ├── laya_oscillators/        # Отдел Осцилляторов
+│   │   │   ├── model.pt
+│   │   │   ├── config.yaml
+│   │   │   └── metrics.json
+│   │   │
+│   │   ├── laya_volume/             # Отдел Объемов
+│   │   │   ├── model.pt
+│   │   │   ├── config.yaml
+│   │   │   └── metrics.json
+│   │   │
+│   │   └── laya_market/             # Отдел Рыночных данных
+│   │       ├── model.pt
+│   │       ├── config.yaml
+│   │       └── metrics.json
+│   │
+│   └── director/                    # Директор (мета-модель)
+│       ├── laya_director.pt
+│       ├── config.yaml              # Как агрегирует решения
+│       └── metrics.json
+│
+├── training/                        # Обучение моделей
+│   ├── train_specialist.py          # Обучение одной Laya-специалиста
+│   ├── train_director.py            # Обучение Директора
+│   ├── walk_forward.py              # Walk-forward валидация
+│   ├── backtest.py                  # Бэктест стратегий
+│   │
+│   ├── configs/                     # Конфиги обучения
+│   │   ├── specialist_trend.yaml
+│   │   ├── specialist_oscillators.yaml
+│   │   ├── specialist_volume.yaml
+│   │   ├── specialist_market.yaml
+│   │   └── director.yaml
+│   │
+│   ├── labels/                      # Генерация меток
+│   │   ├── realized_returns.py      # Метки на основе реализованной доходности
+│   │   ├── max_profit.py            # Максимальная прибыль за N свечей
+│   │   └── regime_labels.py         # Метки рыночных режимов
+│   │
+│   └── evaluation/                  # Оценка качества
+│       ├── metrics.py               # Sharpe, Sortino, MaxDD, Win Rate
+│       ├── calibration.py           # Проверка калибровки вероятностей
+│       └── feature_importance.py    # Важность фичей
+│
+├── inference/                       # Инференс (реальная торговля)
+│   ├── agents/                      # Агенты-специалисты
+│   │   ├── trend_agent.py           # Загрузка и вызов laya_trend
+│   │   ├── oscillators_agent.py
+│   │   ├── volume_agent.py
+│   │   └── market_agent.py
+│   │
+│   ├── director_agent.py            # Агрегация решений
+│   ├── risk_manager.py              # Проверка лимитов риска
+│   ├── position_sizer.py            # Расчет размера позиции (Kelly Criterion)
+│   └── order_executor.py            # Отправка ордеров на биржу
+│
+├── strategies/                      # Торговые стратегии
+│   ├── base_strategy.py             # Базовый класс стратегии
+│   ├── scalping_strategy.py         # Скальпинг (5m, 15m)
+│   ├── swing_strategy.py            # Свинг (1h, 4h)
+│   └── ensemble_strategy.py         # Комбинированная стратегия
+│
+├── utils/                           # Утилиты
+│   ├── logger.py                    # Логирование
+│   ├── exchange_client.py           # API биржи (ccxt)
+│   ├── state_serializer.py          # Сериализация состояния в текст для Laya
+│   └── performance_tracker.py       # Трекинг PnL
+│
+├── notebooks/                       # Jupyter ноутбуки для исследований
+│   ├── 01_exploratory_analysis.ipynb
+│   ├── 02_feature_analysis.ipynb
+│   ├── 03_model_evaluation.ipynb
+│   └── 04_backtest_results.ipynb
+│
+├── scripts/                         # Скрипты для запуска
+│   ├── collect_data.py              # Сбор исторических данных
+│   ├── train_all_models.sh          # Обучение всех моделей
+│   ├── run_backtest.py              # Запуск бэктеста
+│   └── start_live_trading.py        # Запуск реальной торговли
+│
+├── tests/                           # Тесты
+│   ├── test_indicators.py
+│   ├── test_models.py
+│   ├── test_agents.py
+│   └── test_strategy.py
+│
+├── requirements.txt                 # Python зависимости
+├── pyproject.toml                   # Конфиг проекта
+└── README.md                        # Документация
+
+
+Ты сейчас архитектор
