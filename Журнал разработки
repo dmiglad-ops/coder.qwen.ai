@@ -1,1 +1,13 @@
-
+Предлагаемое содержимое "Журнал разработки":
+[2026-09-24] Старт Phase 0 по документу v4.2.
+- Собраны данные mainnet: SOL/BTC/ETH 1h+4h 2022-01→2026-09, funding SOL (5401 запись).
+- Датасет: 41421 строка, классы {hold:0.51, long:0.24, short:0.25} — корректировка порога не требуется.
+- Реализованы модули: data_collector, features, backtest, benchmarks, oos_guard, run_phase0.
+- Защита OOS_FINAL протестирована (PermissionError без флага, ValueError при пересечении).
+- Запущен полный прогон Phase 0 (Optuna 40 trials, WF 5 фолдов, embargo 72).
+РЕШЕНИЯ: индикаторы на чистом pandas (без TA-lib); hour_of_day исключён (раздел 3.4);
+  holding=24 в бэктесте = label horizon (SL/TP-политика — в Phase 1, раздел 4.6).
+СЛЕДУЮЩИЕ ШАГИ: 1) вердикт GO/NO-GO из logs/phase0_run.log; 2) HTML-отчёт report.py;
+  3) при GO — Phase 1: ансамбль, калибровка, ATR SL/TP, мульти-актив BTC/ETH (данные уже собраны);
+  4) заморозить OOS_FINAL (freeze_oos_final) и НЕ трогать до конца Phase 2.
+ОГРАНИЧЕНИЯ СРЕДЫ: n_trials уменьшен с 100 до 40 (песочница); на целевом железе — 100+.
