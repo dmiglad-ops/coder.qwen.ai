@@ -1,127 +1,1224 @@
+# 📋 АРХИТЕКТУРА ТОРГОВОЙ СИСТЕМЫ
+## Крипто-торговая система на базе Laya (Multi-Agent)
+
+**Версия документа:** 2.0 (финальная)  
+**Дата:** 23 сентября 2026  
+**Статус:** Утверждено. Для передачи разработчику.
+
+---
+
+## 1. 📖 ОБЩЕЕ ОПИСАНИЕ
+
+### 1.1. Назначение
+Система автоматической торговли криптовалютами на бирже Bybit, использующая ансамбль специализированных ML-моделей (на базе Laya) для принятия торговых решений.
+
+### 1.2. Ключевые характеристики
+- **Биржа:** Bybit (demo account, 10,000$)
+- **Торгуемые инструменты:** до 10 валютных пар одновременно
+- **Таймфреймы:** 5m, 15m, 30m, 1h, 4h, 1d (стандартные Bybit)
+- **Модель принятия решений:** иерархия из 4 специалистов + 1 Директор на каждую пару
+- **Модель инференса:** Laya (421M параметров, дообученная на русском)
+
+### 1.3. Ключевой принцип
+**Разные пары — разные наборы специалистов.** Для каждой торговой пары может быть подключен свой уникальный набор советников с индивидуальными весами и настройками.
+
+---
+
+## 2. 🏗️ АРХИТЕКТУРА СИСТЕМЫ
+
+### 2.1. Общая схема
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   MAIN COORDINATOR                       │
+│  (главный процесс: сбор данных, координация, исполнение) │
+└──────────────┬──────────────────────────────────────────┘
+               │ ZeroMQ
+               │
+    ┌──────────┼──────────────────────────────────┐
+    │          │          │          │            │
+┌───▼────┐ ┌──▼────┐ ┌───▼──┐ ┌───▼──┐ ┌──────▼─────┐
+│SPECIAL │ │SPECIAL│ │SPEC  │ │SPEC  │ │ DIRECTOR   │
+│_IST_1  │ │_IST_2 │ │_IST_3│ │_IST_4│ │  (per pair)│
+│(trend) │ │(osc)  │ │(vol) │ │(mkt) │ │            │
+│GPU 0   │ │GPU 1  │ │GPU 0 │ │GPU 1 │ │ CPU        │
+└───┬────┘ └──┬────┘ └──┬───┘ └──┬───┘ └────┬───────┘
+    │         │         │        │           │
+    └─────────┴─────────┴────────┴───────────┘
+                      │
+              ┌───────▼───────┐
+              │   EXECUTOR    │
+              │ (Bybit API)   │
+              │ Order Manager │
+              └───────────────┘
+```
+
+### 2.2. Концепция "Специалист → Пара"
+
+**Критически важное решение:** Специалисты (советники) — это **переиспользуемые компоненты**, которые подключаются к конкретным торговым парам через конфигурацию.
+
+```
+┌──────────────────────────────────────────────────────┐
+│              РЕЕСТР СПЕЦИАЛИСТОВ                     │
+├──────────────────────────────────────────────────────┤
+│  trend_v1     (обучен на BTC)     → работает на 4h   │
+│  trend_v2     (обучен на ETH)     → работает на 1h   │
+│  osc_v1       (обучен на всех)    → работает на 30m  │
+│  volume_v1    (обучен на всех)    → работает на 5m   │
+│  market_v1    (обучен на всех)    → работает на 1h   │
+│  trend_alt_v1 (обучен на SOL)     → работает на 30m  │
+└──────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────┐
+│           ПРИВЯЗКА К ПАРОВЫМ КОНФИГУРАЦИЯМ           │
+├──────────────────────────────────────────────────────┤
+│  BTC_USDT:                                           │
+│    trend:    trend_v1     (вес 0.30)                 │
+│    osc:      osc_v1       (вес 0.25)                 │
+│    volume:   volume_v1    (вес 0.25)                 │
+│    market:   market_v1    (вес 0.20)                 │
+│                                                      │
+│  ETH_USDT:                                           │
+│    trend:    trend_v2     (вес 0.35)                 │
+│    osc:      osc_v1       (вес 0.25)                 │
+│    volume:   volume_v1    (вес 0.20)                 │
+│    market:   market_v1    (вес 0.20)                 │
+│                                                      │
+│  SOL_USDT:                                           │
+│    trend:    trend_alt_v1 (вес 0.40)                 │
+│    osc:      osc_v1       (вес 0.30)                 │
+│    volume:   volume_v1    (вес 0.30)                 │
+│    market:   market_v1    (вес 0.00) ← отключен!     │
+└──────────────────────────────────────────────────────┘
+```
+
+**Принцип:**
+- Один и тот же специалист (`osc_v1`) может использоваться на **нескольких парах** одновременно
+- Один и тот же тип специалиста (например, "trend") может быть **разным специалистом** на разных парах
+- Вес специалиста можно устанавливать **индивидуально для каждой пары** (включая 0 = отключен)
+
+### 2.3. Директор для каждой пары
+
+**Для каждой пары — свой Директор** (или общий Директор с контекстом пары):
+
+```
+Директор для BTC:
+  - Получает решения от 4 специалистов, привязанных к BTC
+  - Знает контекст пары (волатильность, объемы, режим)
+  - Принимает финальное решение о сделке на BTC
+
+Директор для ETH:
+  - Получает решения от 4 специалистов, привязанных к ETH
+  - Знает контекст пары
+  - Принимает финальное решение о сделке на ETH
+```
+
+---
+
+## 3. 📊 МОДЕЛЬ ДАННЫХ
+
+### 3.1. Структура хранения
+
+```
+project/
+├── data/
+│   ├── historical/                      # Исторические свечи (Parquet)
+│   │   └── bybit/
+│   │       ├── BTC_USDT/
+│   │       │   ├── 5m/
+│   │       │   │   ├── 2024-01.parquet
+│   │       │   │   ├── 2024-02.parquet
+│   │       │   │   └── ...
+│   │       │   ├── 15m/
+│   │       │   ├── 30m/
+│   │       │   ├── 1h/
+│   │       │   ├── 4h/
+│   │       │   └── 1d/
+│   │       ├── ETH_USDT/
+│   │       │   └── ... (аналогично)
+│   │       └── ... (до 10 пар)
+│   │
+│   ├── indicators/                      # Предвычисленные индикаторы
+│   │   └── {SYMBOL}/
+│   │       └── {TIMEFRAME}/
+│   │           ├── trend.parquet
+│   │           ├── oscillators.parquet
+│   │           ├── volume.parquet
+│   │           └── market.parquet
+│   │
+│   ├── realtime/                        # Live-данные (буфер)
+│   │   └── {SYMBOL}/
+│   │       └── {TIMEFRAME}/
+│   │           └── latest.parquet       # Последние N свечей
+│   │
+│   ├── metadata.db                      # SQLite база метаданных
+│   └── state/                           # Состояние системы
+│       ├── checkpoint.json              # Checkpoint для восстановления
+│       └── positions.json               # Текущие позиции
+```
+
+### 3.2. Схема SQLite базы (`metadata.db`)
+
+```sql
+-- Модели и их версии
+CREATE TABLE models (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,               -- trend_v1, osc_v1, director_btc
+    model_type TEXT NOT NULL,         -- specialist / director
+    specialist_category TEXT,         -- trend / oscillators / volume / market
+    version TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    -- Метрики обучения
+    train_sharpe REAL,
+    train_max_drawdown REAL,
+    train_win_rate REAL,
+    train_profit_factor REAL,
+    
+    -- Метрики бэктеста (out-of-sample)
+    backtest_sharpe REAL,
+    backtest_max_drawdown REAL,
+    backtest_win_rate REAL,
+    backtest_profit_factor REAL,
+    backtest_start_date DATE,
+    backtest_end_date DATE,
+    
+    -- Метрики живой торговли
+    live_sharpe REAL,
+    live_max_drawdown REAL,
+    live_win_rate REAL,
+    live_profit_factor REAL,
+    
+    -- Конфигурация
+    config_path TEXT,                 -- путь к YAML конфигу модели
+    weights_path TEXT,                -- путь к файлам весов модели
+    training_config TEXT,             -- JSON с параметрами обучения
+    
+    -- Композитный скор
+    composite_score REAL,             -- вычисляется по формуле
+    
+    status TEXT DEFAULT 'active',     -- active / archived / deprecated
+    notes TEXT
+);
+
+-- Привязка моделей к парам (кто работает на какой паре)
+CREATE TABLE pair_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,             -- BTC_USDT
+    specialist_category TEXT NOT NULL, -- trend / oscillators / volume / market
+    model_id INTEGER NOT NULL,
+    weight REAL DEFAULT 0.25,         -- вес в ансамбле (0 = отключен)
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (model_id) REFERENCES models(id),
+    UNIQUE(symbol, specialist_category, model_id)
+);
+
+-- Торговые сделки (история)
+CREATE TABLE trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,               -- long / short
+    entry_price REAL,
+    exit_price REAL,
+    quantity REAL,
+    entry_time TIMESTAMP,
+    exit_time TIMESTAMP,
+    pnl REAL,
+    pnl_pct REAL,
+    
+    -- Кто принял решение
+    director_model_id INTEGER,
+    trend_confidence REAL,
+    oscillators_confidence REAL,
+    volume_confidence REAL,
+    market_confidence REAL,
+    
+    -- Метаданные
+    strategy TEXT,
+    stop_loss_price REAL,
+    take_profit_price REAL,
+    commission REAL,
+    
+    FOREIGN KEY (director_model_id) REFERENCES models(id)
+);
+
+-- Открытые позиции
+CREATE TABLE positions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    entry_price REAL,
+    quantity REAL,
+    entry_time TIMESTAMP,
+    stop_loss_price REAL,
+    take_profit_price REAL,
+    current_pnl REAL,
+    status TEXT DEFAULT 'open',       -- open / closed / stopped
+    
+    FOREIGN KEY (symbol) REFERENCES pair_assignments(symbol)
+);
+
+-- Результаты бэктестов
+CREATE TABLE backtests (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_id INTEGER,
+    symbol TEXT,
+    start_date DATE,
+    end_date DATE,
+    initial_balance REAL,
+    final_balance REAL,
+    total_trades INTEGER,
+    win_rate REAL,
+    sharpe REAL,
+    max_drawdown REAL,
+    profit_factor REAL,
+    sortino REAL,
+    
+    config_snapshot TEXT,             -- JSON конфига на момент бэктеста
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (model_id) REFERENCES models(id)
+);
+
+-- Системные события и логи
+CREATE TABLE events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    level TEXT NOT NULL,              -- INFO / WARNING / ERROR / CRITICAL
+    component TEXT,                   -- coordinator / trend_v1 / director_btc / executor
+    event_type TEXT,                  -- trade_opened / error / model_loaded / alert_sent
+    message TEXT,
+    metadata TEXT                     -- JSON с доп. данными
+);
+
+-- Алерты
+CREATE TABLE alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    severity TEXT NOT NULL,           -- info / warning / critical
+    channel TEXT,                     -- max_bot / telegram / email (заглушки)
+    recipient TEXT,
+    message TEXT,
+    was_sent BOOLEAN DEFAULT FALSE,
+    error_message TEXT
+);
+```
+
+---
+
+## 4. 📦 КОМПОНЕНТЫ СИСТЕМЫ
+
+### 4.1. Дерево проекта
+
+```
 crypto-trading-system/
 │
-├── config/                          # Конфигурация системы
-│   ├── symbols.yaml                 # Список торгуемых монет (BTC, ETH, SOL...)
-│   ├── timeframes.yaml              # Таймфреймы (5m, 15m, 1h, 4h)
-│   ├── risk_management.yaml         # Лимиты риска, размер позиции
-│   └── exchange.yaml                # API ключи биржи, комиссии
+├── config/                              # YAML конфигурации
+│   ├── system.yaml                      # Общие настройки системы
+│   ├── exchange.yaml                    # Bybit API настройки
+│   ├── risk_management.yaml             # Глобальные лимиты риска
+│   ├── trading.yaml                     # Торговые параметры
+│   │
+│   ├── specialists/                     # Конфиги специалистов
+│   │   ├── trend_v1.yaml
+│   │   ├── trend_v2.yaml
+│   │   ├── osc_v1.yaml
+│   │   ├── volume_v1.yaml
+│   │   └── market_v1.yaml
+│   │
+│   ├── directors/                       # Конфиги директоров
+│   │   ├── director_btc.yaml
+│   │   └── director_default.yaml
+│   │
+│   └── pairs/                           # Привязка специалистов к парам
+│       ├── BTC_USDT.yaml
+│       ├── ETH_USDT.yaml
+│       └── SOL_USDT.yaml
 │
-├── data/                            # Данные и пайплайны
-│   ├── collectors/                  # Сбор данных с биржи
-│   │   ├── candle_collector.py      # Свечи OHLCV
-│   │   ├── orderbook_collector.py   # Стакан (bid/ask)
-│   │   ├── funding_collector.py     # Funding rates
-│   │   └── open_interest_collector.py
+├── core/                                # Ядро системы
+│   ├── __init__.py
+│   ├── coordinator.py                   # Главный процесс-координатор
+│   ├── state_machine.py                 # Конечный автомат состояний
+│   ├── checkpoint.py                    # Система чекпоинтов
+│   └── event_bus.py                     # Шина событий (ZeroMQ wrapper)
+│
+├── data/                                # Работа с данными
+│   ├── __init__.py
+│   ├── collectors/                      # Сбор данных
+│   │   ├── bybit_collector.py           # Bybit API клиент
+│   │   ├── historical_loader.py         # Загрузка исторических данных
+│   │   └── realtime_stream.py           # Стриминг реалтайм данных
 │   │
-│   ├── storage/                     # Хранение данных
-│   │   ├── historical/              # Исторические данные (Parquet/SQLite)
-│   │   └── realtime/                # Реалтайм буфер
+│   ├── storage/                         # Хранение
+│   │   ├── parquet_store.py             # Parquet I/O
+│   │   ├── sqlite_store.py              # SQLite wrapper
+│   │   └── cache.py                     # Кэширование данных
 │   │
-│   └── preprocessing/               # Подготовка фичей
-│       ├── indicators/              # Расчет индикаторов
-│       │   ├── trend.py             # EMA, MACD, ADX, SMA
-│       │   ├── oscillators.py       # RSI, Stochastic, CCI
-│       │   ├── volume.py            # OBV, VWAP, Volume Ratio
-│       │   └── market.py            # Funding, OI, Long/Short
+│   └── preprocessing/                   # Предобработка
+│       ├── indicators/                  # Расчет индикаторов
+│       │   ├── base_indicator.py        # Базовый класс индикатора
+│       │   ├── trend_indicators.py      # EMA, MACD, ADX, SMA
+│       │   ├── oscillator_indicators.py # RSI, Stochastic, CCI, MFI
+│       │   ├── volume_indicators.py     # OBV, VWAP, Volume Ratio
+│       │   ├── market_indicators.py     # Funding Rate, OI, L/S Ratio
+│       │   └── indicator_engine.py      # Движок расчета (возможно на C)
 │       │
-│       ├── feature_engineering.py   # Нормализация, масштабирование
-│       └── dataset_builder.py       # Создание датасетов для обучения
+│       ├── feature_engineering.py       # Нормализация, масштабирование
+│       └── dataset_builder.py           # Сборка датасетов для обучения
 │
-├── models/                          # Обученные модели
-│   ├── specialists/                 # Специализированные Laya
-│   │   ├── laya_trend/              # Отдел Тренда
+├── models/                              # ML модели
+│   ├── __init__.py
+│   ├── laya/                            # Работа с Laya
+│   │   ├── laya_wrapper.py              # Обертка для инференса
+│   │   ├── laya_trainer.py              # Обучение/дообучение
+│   │   └── state_serializer.py          # Сериализация состояния для Laya
+│   │
+│   ├── specialists/                     # Специалисты
+│   │   ├── base_specialist.py           # Базовый класс специалиста
+│   │   ├── trend_specialist.py          # Трендовый специалист
+│   │   ├── oscillator_specialist.py     # Осцилляторный специалист
+│   │   ├── volume_specialist.py         # Объемный специалист
+│   │   └── market_specialist.py         # Специалист по рыночным данным
+│   │
+│   ├── director/                        # Директор
+│   │   ├── director.py                  # Базовый Директор
+│   │   └── pair_director.py             # Директор для конкретной пары
+│   │
+│   ├── registry/                        # Реестр моделей
+│   │   ├── model_registry.py            # Регистрация и поиск моделей
+│   │   └── model_manager.py             # Загрузка/выгрузка из памяти
+│   │
+│   └── evaluation/                      # Оценка моделей
+│       ├── metrics.py                   # Sharpe, Sortino, MaxDD, etc.
+│       ├── calibration.py               # Калибровка вероятностей
+│       └── composite_score.py           # Композитный скор
+│
+├── trading/                             # Торговая логика
+│   ├── __init__.py
+│   ├── executor/                        # Исполнение сделок
+│   │   ├── bybit_executor.py            # Bybit API исполнение
+│   │   ├── order_manager.py             # Управление ордерами
+│   │   └── position_tracker.py          # Отслеживание позиций
+│   │
+│   ├── risk/                            # Риск-менеджмент
+│   │   ├── risk_manager.py              # Проверка лимитов
+│   │   ├── position_sizer.py            # Расчет размера позиции
+│   │   └── stop_loss_manager.py         # Управление стоп-лоссами
+│   │
+│   └── strategies/                      # Стратегии
+│       ├── base_strategy.py             # Базовая стратегия
+│       └── ensemble_strategy.py         # Ансамблевая стратегия
+│
+├── training/                            # Обучение моделей
+│   ├── __init__.py
+│   ├── train_specialist.py              # Обучение специалиста
+│   ├── train_director.py                # Обучение Директора
+│   ├── walk_forward.py                  # Walk-forward валидация
+│   ├── out_of_sample.py                 # Out-of-sample тестирование
+│   └── experiment_tracker.py            # Трекинг экспериментов
+│
+├── backtesting/                         # Бэктестинг
+│   ├── __init__.py
+│   ├── backtester.py                    # Основной бэктестер (возможно на C)
+│   ├── simulator.py                     # Симуляция торговли
+│   ├── metrics_calculator.py            # Расчет метрик
+│   └── report_generator.py              # Генерация отчетов
+│
+├── dashboard/                           # Веб-дашборд
+│   ├── __init__.py
+│   ├── api/                             # FastAPI endpoints
+│   │   ├── main.py                      # Основной FastAPI сервер
+│   │   ├── routes/
+│   │   │   ├── status.py                # Статус системы
+│   │   │   ├── positions.py             # Позиции
+│   │   │   ├── trades.py                # История сделок
+│   │   │   ├── models.py                # Модели и специалисты
+│   │   │   ├── pairs.py                 # Привязка специалистов к парам
+│   │   │   ├── metrics.py               # Метрики
+│   │   │   └── logs.py                  # Логи
+│   │   └── websocket.py                 # WebSocket для реалтайм обновлений
+│   │
+│   ├── frontend/                        # Frontend
+│   │   ├── index.html
+│   │   ├── css/
+│   │   ├── js/
+│   │   └── components/                  # UI компоненты
+│   │
+│   └── services/                        # Бизнес-логика дашборда
+│       ├── pair_assignment_service.py   # Управление привязками
+│       └── model_management_service.py  # Управление моделями
+│
+├── alerts/                              # Система алертов
+│   ├── __init__.py
+│   ├── alert_manager.py                 # Менеджер алертов
+│   ├── channels/                        # Каналы доставки
+│   │   ├── base_channel.py              # Базовый интерфейс
+│   │   ├── max_bot_channel.py           # МАКС бот (основной)
+│   │   ├── telegram_channel.py          # Telegram (заглушка)
+│   │   └── email_channel.py             # Email (заглушка)
+│   └── templates/                       # Шаблоны сообщений
+│       ├── critical.txt
+│       ├── warning.txt
+│       └── info.txt
+│
+├── utils/                               # Утилиты
+│   ├── __init__.py
+│   ├── logger.py                        # Логирование
+│   ├── config_loader.py                 # Загрузка и валидация YAML
+│   ├── time_utils.py                    # Работа со временем
+│   └── performance.py                   # Профилирование
+│
+├── tests/                               # Тесты
+│   ├── unit/
+│   ├── integration/
+│   ├── backtest/
+│   └── stress/
+│
+├── scripts/                             # Скрипты управления
+│   ├── collect_data.py                  # Сбор исторических данных
+│   ├── train_model.py                   # Обучение модели
+│   ├── run_backtest.py                  # Запуск бэктеста
+│   ├── start_system.py                  # Запуск торговой системы
+│   ├── stop_system.py                   # Остановка системы
+│   └── health_check.py                  # Проверка здоровья системы
+│
+├── state/                               # Runtime state
+│   ├── checkpoint.json
+│   └── positions.json
+│
+├── models_store/                        # Хранилище весов моделей
+│   ├── specialists/
+│   │   ├── trend_v1/
 │   │   │   ├── model.pt
-│   │   │   ├── config.yaml          # Какие фичи использует
-│   │   │   └── metrics.json         # Точность, Sharpe на бэктесте
-│   │   │
-│   │   ├── laya_oscillators/        # Отдел Осцилляторов
-│   │   │   ├── model.pt
-│   │   │   ├── config.yaml
-│   │   │   └── metrics.json
-│   │   │
-│   │   ├── laya_volume/             # Отдел Объемов
-│   │   │   ├── model.pt
-│   │   │   ├── config.yaml
-│   │   │   └── metrics.json
-│   │   │
-│   │   └── laya_market/             # Отдел Рыночных данных
-│   │       ├── model.pt
-│   │       ├── config.yaml
-│   │       └── metrics.json
-│   │
-│   └── director/                    # Директор (мета-модель)
-│       ├── laya_director.pt
-│       ├── config.yaml              # Как агрегирует решения
-│       └── metrics.json
+│   │   │   └── config.yaml
+│   │   └── ...
+│   └── directors/
+│       ├── director_btc/
+│       │   └── model.pt
+│       └── ...
 │
-├── training/                        # Обучение моделей
-│   ├── train_specialist.py          # Обучение одной Laya-специалиста
-│   ├── train_director.py            # Обучение Директора
-│   ├── walk_forward.py              # Walk-forward валидация
-│   ├── backtest.py                  # Бэктест стратегий
-│   │
-│   ├── configs/                     # Конфиги обучения
-│   │   ├── specialist_trend.yaml
-│   │   ├── specialist_oscillators.yaml
-│   │   ├── specialist_volume.yaml
-│   │   ├── specialist_market.yaml
-│   │   └── director.yaml
-│   │
-│   ├── labels/                      # Генерация меток
-│   │   ├── realized_returns.py      # Метки на основе реализованной доходности
-│   │   ├── max_profit.py            # Максимальная прибыль за N свечей
-│   │   └── regime_labels.py         # Метки рыночных режимов
-│   │
-│   └── evaluation/                  # Оценка качества
-│       ├── metrics.py               # Sharpe, Sortino, MaxDD, Win Rate
-│       ├── calibration.py           # Проверка калибровки вероятностей
-│       └── feature_importance.py    # Важность фичей
-│
-├── inference/                       # Инференс (реальная торговля)
-│   ├── agents/                      # Агенты-специалисты
-│   │   ├── trend_agent.py           # Загрузка и вызов laya_trend
-│   │   ├── oscillators_agent.py
-│   │   ├── volume_agent.py
-│   │   └── market_agent.py
-│   │
-│   ├── director_agent.py            # Агрегация решений
-│   ├── risk_manager.py              # Проверка лимитов риска
-│   ├── position_sizer.py            # Расчет размера позиции (Kelly Criterion)
-│   └── order_executor.py            # Отправка ордеров на биржу
-│
-├── strategies/                      # Торговые стратегии
-│   ├── base_strategy.py             # Базовый класс стратегии
-│   ├── scalping_strategy.py         # Скальпинг (5m, 15m)
-│   ├── swing_strategy.py            # Свинг (1h, 4h)
-│   └── ensemble_strategy.py         # Комбинированная стратегия
-│
-├── utils/                           # Утилиты
-│   ├── logger.py                    # Логирование
-│   ├── exchange_client.py           # API биржи (ccxt)
-│   ├── state_serializer.py          # Сериализация состояния в текст для Laya
-│   └── performance_tracker.py       # Трекинг PnL
-│
-├── notebooks/                       # Jupyter ноутбуки для исследований
-│   ├── 01_exploratory_analysis.ipynb
-│   ├── 02_feature_analysis.ipynb
-│   ├── 03_model_evaluation.ipynb
-│   └── 04_backtest_results.ipynb
-│
-├── scripts/                         # Скрипты для запуска
-│   ├── collect_data.py              # Сбор исторических данных
-│   ├── train_all_models.sh          # Обучение всех моделей
-│   ├── run_backtest.py              # Запуск бэктеста
-│   └── start_live_trading.py        # Запуск реальной торговли
-│
-├── tests/                           # Тесты
-│   ├── test_indicators.py
-│   ├── test_models.py
-│   ├── test_agents.py
-│   └── test_strategy.py
-│
-├── requirements.txt                 # Python зависимости
-├── pyproject.toml                   # Конфиг проекта
-└── README.md                        # Документация
+├── requirements.txt
+├── pyproject.toml
+├── Dockerfile                           # Опционально
+├── Makefile                             # Часто используемые команды
+└── README.md
+```
 
+---
 
-Ты сейчас архитектор
+## 5. ⚙️ КОНФИГУРАЦИЯ
+
+### 5.1. `config/system.yaml` — Общие настройки
+
+```yaml
+system:
+  name: "Crypto Trading System"
+  version: "1.0.0"
+  log_level: "INFO"
+  
+  # Процессы
+  processes:
+    coordinator:
+      enabled: true
+      max_restarts: 3
+      
+  # GPU распределение
+  gpu_allocation:
+    gpu_0:
+      specialists: ["trend_v1", "volume_v1"]
+    gpu_1:
+      specialists: ["osc_v1", "market_v1"]
+    cpu:
+      specialists: ["director_btc", "director_eth"]
+  
+  # Message Queue
+  message_queue:
+    type: "zeromq"
+    base_port: 5555
+    timeout_ms: 5000
+    
+  # Checkpoint
+  checkpoint:
+    enabled: true
+    interval_seconds: 60
+    path: "state/checkpoint.json"
+```
+
+### 5.2. `config/exchange.yaml` — Bybit настройки
+
+```yaml
+exchange:
+  name: "bybit"
+  mode: "demo"                     # demo / live
+  
+  api:
+    api_key: "${BYBIT_API_KEY}"    # Из переменных окружения
+    api_secret: "${BYBIT_API_SECRET}"
+    testnet: true                  # Для demo
+    
+  trading:
+    max_open_positions: 3          # Максимум одновременных позиций
+    max_position_pct: 0.05         # Максимум 5% депозита на позицию
+    leverage: 1                    # Без плеча для начала
+    
+  rate_limits:
+    requests_per_second: 10
+    burst_limit: 20
+```
+
+### 5.3. `config/pairs/BTC_USDT.yaml` — Привязка специалистов к паре
+
+```yaml
+pair:
+  symbol: "BTC_USDT"
+  enabled: true
+  
+  # Специалисты, привязанные к этой паре
+  specialists:
+    trend:
+      model_id: "trend_v1"         # ID модели в реестре
+      weight: 0.30                 # Вес в ансамбле
+      enabled: true
+      
+    oscillators:
+      model_id: "osc_v1"
+      weight: 0.25
+      enabled: true
+      
+    volume:
+      model_id: "volume_v1"
+      weight: 0.25
+      enabled: true
+      
+    market:
+      model_id: "market_v1"
+      weight: 0.20
+      enabled: true
+  
+  # Директор для этой пары
+  director:
+    model_id: "director_btc"
+    
+  # Таймфреймы для этой пары
+  timeframes:
+    primary: "5m"                  # Основной ТФ для торговли
+    confirmation: ["1h", "4h"]     # ТФ для подтверждения
+    
+  # Индивидуальные настройки торговли для этой пары
+  trading:
+    min_confidence: 0.65           # Минимальная уверенность для входа
+    stop_loss_pct: 0.02            # 2% стоп
+    take_profit_pct: 0.04          # 4% тейк
+    position_size_pct: 0.03        # 3% от депозита на сделку
+```
+
+### 5.4. `config/specialists/trend_v1.yaml` — Конфиг специалиста
+
+```yaml
+specialist:
+  name: "trend_v1"
+  category: "trend"
+  description: "Трендовый специалист v1 (обучен на BTC 2022-2024)"
+  
+  # Модель
+  model:
+    base: "10vivo01/laya-ru-tickets"
+    weights_path: "models_store/specialists/trend_v1/model.pt"
+    
+  # Индикаторы
+  features:
+    - ema_20
+    - ema_50
+    - ema_200
+    - macd
+    - macd_signal
+    - macd_histogram
+    - adx
+    - sma_slope
+    
+  # Таймфреймы
+  timeframes:
+    - 1h
+    - 4h
+    
+  # Вопросы для Laya
+  questions:
+    action:
+      type: "choice"
+      options: ["long", "short", "hold"]
+    confidence:
+      type: "score"
+      min: 0
+      max: 10
+    strength:
+      type: "choice"
+      options: ["weak", "moderate", "strong"]
+      
+  # Обучение
+  training:
+    epochs: 10
+    learning_rate: 2e-5
+    batch_size: 32
+    
+  # Инференс
+  inference:
+    gpu_id: 0
+    batch_size: 1                  # По одному запросу
+    timeout_ms: 5000
+```
+
+---
+
+## 6. 🔄 ПАЙПЛАЙН ДАННЫХ
+
+### 6.1. Сбор исторических данных
+
+```
+1. Определяем список пар и таймфреймов из конфигурации
+2. Для каждой пары и каждого таймфрейма:
+   a. Проверяем, какие месяцы уже есть в Parquet
+   b. Дозагружаем недостающие месяцы с Bybit
+   c. Сохраняем в Parquet
+3. Пересчитываем индикаторы для новых данных
+4. Сохраняем индикаторы в Parquet
+```
+
+### 6.2. Реалтайм поток
+
+```
+1. Подключаемся к Bybit WebSocket для каждой пары
+2. Получаем новые свечи в реалтайме
+3. Обновляем индикаторы для последней свечи
+4. Отправляем обновленные данные специалистам через ZeroMQ
+5. Специалисты возвращают решения
+6. Директор агрегирует решения
+7. Executor исполняет сделку (если есть сигнал)
+```
+
+---
+
+## 7. 🧠 ПРОЦЕСС ПРИНЯТИЯ РЕШЕНИЙ
+
+### 7.1. Полный цикл (для каждой пары)
+
+```
+Шаг 1: Сбор данных
+  └── Получаем свежие свечи со всех нужных таймфреймов
+  └── Рассчитываем индикаторы
+
+Шаг 2: Сериализация состояния
+  └── Создаем состояние для каждого специалиста
+  └── Формат: { "structured": {...}, "description": "..." }
+
+Шаг 3: Параллельный вызов специалистов
+  └── Отправляем состояние каждому специалисту через ZeroMQ
+  └── Ждем ответы с таймаутом (5 сек)
+  └── Если специалист не ответил → его вес = 0 на эту итерацию
+
+Шаг 4: Агрегация Директором
+  └── Директор получает все ответы
+  └── Учитывает веса специалистов для этой пары
+  └── Формирует финальное решение
+
+Шаг 5: Риск-менеджмент
+  └── Проверяем: не превышен ли дневной лимит убытков?
+  └── Проверяем: не больше ли максимального числа позиций?
+  └── Проверяем: достаточная ли уверенность?
+
+Шаг 6: Исполнение
+  └── Если все проверки пройдены → открываем позицию
+  └── Устанавливаем стоп-лосс и тейк-профит
+  └── Записываем сделку в базу
+  └── Отправляем уведомление в МАКС (опционально)
+
+Шаг 7: Мониторинг позиции
+  └── Отслеживаем открытые позиции
+  └── При срабатывании стоп/тейк → закрываем и логируем
+```
+
+### 7.2. Формат ответа специалиста
+
+```json
+{
+  "specialist_id": "trend_v1",
+  "symbol": "BTC_USDT",
+  "timestamp": "2026-09-23T10:30:00Z",
+  "decision": {
+    "action": "long",
+    "confidence": 7.8,
+    "strength": "moderate"
+  },
+  "latency_ms": 34,
+  "model_version": "2026-09-15_v3"
+}
+```
+
+### 7.3. Формат решения Директора
+
+```json
+{
+  "symbol": "BTC_USDT",
+  "timestamp": "2026-09-23T10:30:05Z",
+  "decision": {
+    "action": "long",
+    "confidence": 0.76,
+    "position_size_pct": 0.03,
+    "stop_loss_pct": 0.02,
+    "take_profit_pct": 0.04
+  },
+  "specialist_votes": {
+    "trend_v1": {"action": "long", "confidence": 7.8, "weight": 0.30},
+    "osc_v1": {"action": "hold", "confidence": 6.5, "weight": 0.25},
+    "volume_v1": {"action": "long", "confidence": 8.2, "weight": 0.25},
+    "market_v1": {"action": "long", "confidence": 7.1, "weight": 0.20}
+  },
+  "reasoning": "3 из 4 специалистов рекомендуют long. Осцилляторы в нейтральной зоне. Объем подтверждает движение.",
+  "model_version": "director_btc_v2"
+}
+```
+
+---
+
+## 8. 🎓 ОБУЧЕНИЕ МОДЕЛЕЙ
+
+### 8.1. Подход
+
+**Основной метод:** Out-of-sample
+- **Обучение:** Данные 2022-2024
+- **Тестирование:** Данные 2025-2026 (один раз, без повторного использования)
+
+**Дополнительно:** Возможность ручного переобучения по запросу пользователя
+- Пользователь может запустить переобучение через дашборд или скрипт
+- При переобучении создается новая версия модели
+
+### 8.2. Пайплайн обучения
+
+```
+1. Подготовка данных
+   └── Загрузка исторических свечей (2022-2024)
+   └── Расчет индикаторов
+   └── Генерация меток (realized returns через N свечей)
+
+2. Обучение специалиста
+   └── Загрузка базовой Laya (laya-ru-tickets)
+   └── Fine-tuning на данных специалиста
+   └── Сохранение весов
+
+3. Валидация
+   └── Прогон на валидационной выборке (последние 10% тренировочных данных)
+   └── Проверка калибровки вероятностей
+
+4. Бэктест (out-of-sample)
+   └── Прогон на тестовых данных (2025-2026)
+   └── Расчет всех метрик
+   └── Сравнение с предыдущей версией
+
+5. Регистрация
+   └── Если метрики лучше → регистрация новой версии в реестре
+   └── Если хуже → отклонение и уведомление
+```
+
+### 8.3. Формула композитного скора
+
+```python
+def calculate_composite_score(metrics):
+    """
+    Вычисляет композитный скор модели.
+    Чем выше скор, тем лучше модель.
+    """
+    # Нормализация метрик к [0, 1]
+    pf_norm = min(metrics['profit_factor'] / 3.0, 1.0)  # PF 3.0 = максимум
+    sharpe_norm = min(metrics['sharpe'] / 3.0, 1.0)     # Sharpe 3.0 = максимум
+    dd_norm = 1.0 - min(metrics['max_drawdown'], 0.5)   # MaxDD 50% = минимум
+    wr_norm = metrics['win_rate']                        # Уже в [0, 1]
+    
+    # Взвешенная сумма
+    score = (
+        0.35 * pf_norm +      # Profit Factor (самый важный)
+        0.30 * sharpe_norm +   # Sharpe Ratio
+        0.20 * dd_norm +       # 1 - Max Drawdown
+        0.15 * wr_norm         # Win Rate
+    )
+    
+    return score
+```
+
+---
+
+## 9. 📊 ВЕБ-ДАШБОРД
+
+### 9.1. Основные страницы
+
+```
+/                          → Главная страница (статус системы)
+/positions                 → Открытые позиции
+/trades                    → История сделок
+/models                    → Реестр моделей и их метрики
+/pairs                     → Управление привязками специалистов к парам
+/backtests                 → Результаты бэктестов
+/logs                      → Системные логи
+/settings                  → Настройки системы
+```
+
+### 9.2. Функционал управления парами
+
+**Критически важный раздел:** `/pairs`
+
+Позволяет пользователю:
+1. **Просматривать** список всех торговых пар
+2. **Включать/выключать** пару
+3. **Назначать специалистов** на конкретную пару:
+   - Выбрать специалиста из реестра (например, `trend_v1`, `trend_v2`)
+   - Установить вес специалиста для этой пары
+   - Включить/отключить специалиста
+4. **Выбирать Директора** для пары
+5. **Настраивать таймфреймы** для пары
+6. **Настраивать параметры торговли** (стоп, тейк, размер позиции)
+
+**Пример UI:**
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Управление парой: BTC_USDT                                  │
+├─────────────────────────────────────────────────────────────┤
+│  Статус: [Включена ✓]                                       │
+│                                                              │
+│  Специалисты:                                                │
+│  ┌────────────────┬──────────────┬────────┬────────┐        │
+│  │ Категория      │ Модель       │ Вес    │ Статус │        │
+│  ├────────────────┼──────────────┼────────┼────────┤        │
+│  │ Trend          │ trend_v1  ▼  │ 0.30   │ [✓]    │        │
+│  │ Oscillators    │ osc_v1    ▼  │ 0.25   │ [✓]    │        │
+│  │ Volume         │ volume_v1 ▼  │ 0.25   │ [✓]    │        │
+│  │ Market         │ market_v1 ▼  │ 0.20   │ [✓]    │        │
+│  └────────────────┴──────────────┴────────┴────────┘        │
+│                                                              │
+│  Директор: [director_btc ▼]                                 │
+│                                                              │
+│  Таймфреймы:                                                 │
+│    Основной: [5m ▼]                                         │
+│    Подтверждение: [1h ✓] [4h ✓] [1d ☐]                     │
+│                                                              │
+│  Торговля:                                                   │
+│    Мин. уверенность: [0.65]                                 │
+│    Стоп-лосс: [2.0%]                                        │
+│    Тейк-профит: [4.0%]                                      │
+│    Размер позиции: [3.0%]                                   │
+│                                                              │
+│  [Сохранить]  [Применить сразу]                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 9.3. Функционал управления моделями
+
+**Раздел:** `/models`
+
+Позволяет:
+1. **Просматривать** все модели в реестре
+2. **Сравнивать** метрики разных версий
+3. **Архивировать** старые версии
+4. **Запускать переобучение** (с указанием периода обучения)
+5. **Проводить бэктест** новой версии
+
+---
+
+## 10. 🛡️ ОБРАБОТКА ОШИБОК
+
+### 10.1. ПРИНЦИП (ОБЯЗАТЕЛЬНО!)
+
+**При любой поломке:**
+1. ✅ **Уведомить пользователя** через МАКС бота
+2. ❌ **НЕ закрывать позиции** автоматически
+3. ❌ **НЕ открывать новые позиции**
+4. ⏸️ Перевести систему в режим **"PAUSED"**
+5. 👤 **Ждать ручного вмешательства** пользователя
+
+### 10.2. Режимы системы
+
+```
+INITIALIZING → RUNNING → PAUSED → SHUTDOWN
+                  │         ↑
+                  │         │
+                  └─────────┘
+                  (при любой ошибке)
+```
+
+| Режим | Описание | Что разрешено |
+|-------|----------|---------------|
+| `INITIALIZING` | Загрузка моделей и данных | Ничего |
+| `RUNNING` | Нормальная работа | Торговля |
+| `PAUSED` | Ошибка, ожидание пользователя | Только мониторинг позиций |
+| `SHUTDOWN` | Корректное завершение | Закрытие процессов |
+
+### 10.3. Типы ошибок и реакции
+
+| Ошибка | Действие | Алерт |
+|--------|----------|-------|
+| Биржа недоступна > 30 сек | PAUSED | CRITICAL |
+| Модель не отвечает > 10 сек | Перезапуск модели | WARNING |
+| Модель не отвечает > 60 сек | PAUSED | CRITICAL |
+| Ошибка в risk manager | PAUSED | CRITICAL |
+| Loss of internet | PAUSED | CRITICAL |
+| Диск заполнен > 90% | Пауза записи | WARNING |
+| Непредвиденная ошибка | PAUSED | CRITICAL |
+
+### 10.4. Checkpoint система
+
+```python
+# Сохраняется каждые 60 секунд и перед каждым действием
+{
+  "timestamp": "2026-09-23T10:30:00Z",
+  "system_state": "RUNNING",
+  "open_positions": [
+    {
+      "symbol": "BTC_USDT",
+      "side": "long",
+      "entry_price": 67500,
+      "quantity": 0.05,
+      "entry_time": "2026-09-23T09:15:00Z"
+    }
+  ],
+  "daily_pnl": -120.50,
+  "last_trade_time": "2026-09-23T09:15:00Z",
+  "active_specialists": {
+    "trend_v1": {"status": "healthy", "gpu_id": 0},
+    "osc_v1": {"status": "healthy", "gpu_id": 1}
+  }
+}
+```
+
+---
+
+## 11. 🔔 СИСТЕМА АЛЕРТОВ
+
+### 11.1. Каналы доставки
+
+| Канал | Статус | Приоритет |
+|-------|--------|-----------|
+| **МАКС бот** | Активен (основной) | Основной |
+| Telegram | Заглушка | - |
+| Email | Заглушка | - |
+
+### 11.2. Приоритеты алертов
+
+| Приоритет | Описание | Пример |
+|-----------|----------|--------|
+| `INFO` | Информационное | "Сделка открыта: BTC long 0.05" |
+| `WARNING` | Внимание | "Специалист trend_v1 не отвечает, перезапуск" |
+| `CRITICAL` | Критично | "Биржа недоступна, система в режиме PAUSED" |
+
+### 11.3. Формат сообщения в МАКС
+
+```
+🔴 КРИТИЧЕСКАЯ ОШИБКА
+
+Система переведена в режим PAUSED.
+
+Причина: Биржа Bybit недоступна более 60 секунд.
+Время: 2026-09-23 10:30:15
+
+Открытые позиции:
+• BTC_USDT: LONG 0.05 @ 67,500 (PnL: +$12.50)
+
+⚠️ Новые сделки НЕ открываются.
+Позиции НЕ закрываются автоматически.
+При необходимости закройте позиции вручную на бирже.
+
+Для возобновления работы перезапустите систему:
+$ python scripts/start_system.py
+```
+
+---
+
+## 12. 🧪 ТЕСТИРОВАНИЕ
+
+### 12.1. Уровни
+
+```
+tests/
+├── unit/                              # Быстрые, изолированные тесты
+│   ├── test_indicators.py             # Расчет индикаторов
+│   ├── test_feature_engineering.py    # Нормализация данных
+│   ├── test_risk_manager.py           # Риск-менеджмент
+│   ├── test_position_sizer.py         # Расчет размера позиции
+│   ├── test_state_serializer.py       # Сериализация для Laya
+│   └── test_composite_score.py        # Формула оценки моделей
+│
+├── integration/                       # Взаимодействие компонентов
+│   ├── test_data_pipeline.py          # Сбор → индикаторы → хранение
+│   ├── test_specialist_communication.py # ZeroMQ коммуникация
+│   ├── test_director_aggregation.py   # Агрегация решений
+│   ├── test_executor.py               # Исполнение ордеров (на testnet)
+│   └── test_checkpoint_recovery.py    # Восстановление после сбоя
+│
+├── backtest/                          # Бэктест сценарии
+│   ├── test_bull_market_2024.py       # Бычий рынок
+│   ├── test_bear_market_2022.py       # Медвежий рынок
+│   ├── test_sideways_2023.py          # Боковик
+│   └── test_high_volatility.py        # Высокая волатильность
+│
+└── stress/                            # Нагрузочные тесты
+    ├── test_multi_symbol.py           # 10 пар одновременно
+    ├── test_rapid_signals.py          # Частые сигналы
+    ├── test_model_failure.py          # Отказ модели
+    ├── test_exchange_outage.py        # Отказ биржи
+    └── test_memory_pressure.py        # Нехватка памяти
+```
+
+### 12.2. Требования к производительности
+
+| Компонент | Целевая скорость | Инструмент |
+|-----------|-----------------|------------|
+| Расчет индикаторов (1000 свечей) | < 10 мс | Возможно на C |
+| Инференс одного специалиста | < 100 мс | GPU |
+| Полный цикл (4 специалиста + директор) | < 500 мс | Параллельно |
+| Бэктест 1 года (5m данные) | < 5 мин | На C, многоядерно |
+| Запись в Parquet (1 месяц) | < 1 сек | PyArrow |
+
+### 12.3. Многоядерность и GPU
+
+- **22 ядра Xeon 2699v4** используются для:
+  - Параллельного бэктестинга
+  - Параллельного расчета индикаторов для разных пар
+  - Параллельного обучения моделей
+  
+- **2x GTX 1070** используются для:
+  - Инференса специалистов (по 2 специалиста на GPU)
+  - Параллельного инференса для разных пар
+
+---
+
+## 13. 🚀 DEPLOYMENT И ОБНОВЛЕНИЯ
+
+### 13.1. Обновление моделей
+
+**Процесс:**
+1. Обучение новой версии модели
+2. Бэктест на out-of-sample данных
+3. Регистрация в реестре
+4. **Загрузка в "pending" состояние** (без остановки торговли)
+5. Валидация на последних данных
+6. **Автоматический swap**, если метрики лучше
+7. Уведомление пользователя об обновлении
+
+**Откат:** Мгновенный возврат к предыдущей версии через дашборд.
+
+### 13.2. Запуск системы
+
+```bash
+# Запуск
+python scripts/start_system.py
+
+# Остановка (корректная)
+python scripts/stop_system.py
+
+# Проверка здоровья
+python scripts/health_check.py
+
+# Сбор данных
+python scripts/collect_data.py --symbols BTC_USDT,ETH_USDT --timeframes 5m,1h,4h
+
+# Обучение модели
+python scripts/train_model.py --specialist trend --pair BTC_USDT --start 2022-01-01 --end 2024-12-31
+
+# Бэктест
+python scripts/run_backtest.py --model trend_v1 --pair BTC_USDT --start 2025-01-01 --end 2026-09-01
+```
+
+---
+
+## 14. 📋 ЧЕК-ЛИСТ ДЛЯ РАЗРАБОТЧИКА
+
+### Фаза 1: Инфраструктура данных (2-3 недели)
+- [ ] Сбор исторических данных с Bybit (все пары, все таймфреймы)
+- [ ] Хранение в Parquet + SQLite
+- [ ] Расчет базовых индикаторов
+- [ ] Пайплайн предобработки данных
+- [ ] Unit tests для индикаторов
+
+### Фаза 2: Модели и специалисты (3-4 недели)
+- [ ] Обертка для Laya (инференс)
+- [ ] Базовый класс специалиста
+- [ ] Реализация 4 типов специалистов (trend, osc, volume, market)
+- [ ] Сериализация состояния для Laya
+- [ ] Обучение первого специалиста (trend)
+- [ ] Out-of-sample валидация
+
+### Фаза 3: Оркестрация (2-3 недели)
+- [ ] Настройка ZeroMQ коммуникации
+- [ ] Отдельные процессы для каждого специалиста
+- [ ] Координатор (main process)
+- [ ] Реализация Директора
+- [ ] Агрегация решений с весами
+- [ ] Checkpoint система
+
+### Фаза 4: Торговля (2-3 недели)
+- [ ] Bybit API интеграция (demo account)
+- [ ] Order manager
+- [ ] Position tracker
+- [ ] Risk manager
+- [ ] Position sizer
+- [ ] Live trading loop
+
+### Фаза 5: Бэктестинг (2 недели)
+- [ ] Бэктестер (возможно на C для скорости)
+- [ ] Расчет метрик (Sharpe, MaxDD, PF, WinRate)
+- [ ] Out-of-sample тестирование
+- [ ] Генерация отчетов
+
+### Фаза 6: Веб-дашборд (2-3 недели)
+- [ ] FastAPI backend
+- [ ] Главная страница (статус)
+- [ ] Управление парами (привязка специалистов)
+- [ ] Управление моделями
+- [ ] История сделок
+- [ ] Логи и события
+
+### Фаза 7: Алерты и мониторинг (1-2 недели)
+- [ ] МАКС бот интеграция
+- [ ] Система приоритетов
+- [ ] Заглушки для Telegram/Email
+- [ ] Health check система
+
+### Фаза 8: Тестирование и оптимизация (2-3 недели)
+- [ ] Полный набор тестов
+- [ ] Stress tests
+- [ ] Оптимизация производительности
+- [ ] Документация
+
+---
+
+## 15. ❓ ВОПРОСЫ ДЛЯ УТОЧНЕНИЯ (если остались)
+
+1. **Индикаторы** — отдельное обсуждение (как договорились). Нужно будет определить конкретный список индикаторов для каждого специалиста.
+
+2. **МАКС бот** — нужен ли токен бота или просто вебхук? Какой формат сообщений предпочтительнее (текст, карточки)?
+
+3. **Бэктестер на C** — готовы ли выделить время на реализацию на C, или начать с Python и оптимизировать позже?
+
+4. **Демо-счет Bybit** — есть ли уже API ключи для testnet?
+
+---
+
+## ✅ ИТОГ
+
+Документ полностью описывает архитектуру системы. Все ключевые решения зафиксированы:
+
+- ✅ Хранение: Parquet + SQLite
+- ✅ Таймфреймы: гибкие, настраиваемые на пару
+- ✅ Оркестрация: отдельные процессы + ZeroMQ
+- ✅ Формат данных: гибрид (исследуется)
+- ✅ Версионирование: SQLite + JSON, композитный скор
+- ✅ Конфигурация: YAML + Python
+- ✅ Дашборд: FastAPI + UI
+- ✅ Ошибки: уведомление → пауза → ожидание пользователя
+- ✅ Тесты: многоядерность + GPU + возможность C-движка
+- ✅ Алерты: МАКС бот + заглушки
+- ✅ Режим: demo account Bybit, 10 пар, гибкая привязка специалистов
+
+**Документ готов для передачи разработчику.**
+
+---
+
+**Подтвердите, что всё в порядке, и я могу дополнить любой раздел более детально при необходимости.**
