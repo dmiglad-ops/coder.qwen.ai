@@ -1,0 +1,11 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Logs and temporary files
+logs/
+*.log
+*.done
+
+# Data artifacts (large binary files)
+data/**/*.parquet

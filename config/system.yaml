@@ -1,0 +1,64 @@
+# Конфигурация Phase 0 — Архитектура торговой системы v4.2
+# Источник: "структура торговой системы.txt", разделы 0.5, 3.2
+
+project:
+  name: "crypto-ml-trading"
+  phase: 0
+  doc_version: "4.2"
+
+data:
+  symbol: "SOL_USDT"          # внутренний символ
+  ccxt_symbol: "SOL/USDT"
+  bybit_symbol: "SOLUSDT"
+  timeframe: "1h"
+  source: "mainnet"           # обучение/реалтайм — MAINNET (раздел 0.5)
+
+splits:                       # раздел 3.3 — КРИТИЧНО
+  train:          ["2022-01-01", "2024-06-30"]
+  validation:     ["2024-07-01", "2024-12-31"]
+  oos_iterative:  ["2025-01-01", "2026-02-28"]
+  oos_final:      ["2026-03-01", "2026-09-01"]   # ЗАМОРОЖЕН — доступ только с --allow-final-oos
+
+labels:                       # раздел 3.5
+  forward_period: 24          # свечей
+  atr_period: 14
+  atr_multiplier: 2.0         # порог 2×ATR
+
+costs:                        # раздел 0.2
+  taker_fee: 0.001            # 0.1%
+  slippage: 0.0005            # 0.05% для SOL_USDT
+  funding_enabled: true
+
+backtest:                     # разделы 3.8–3.9
+  embargo_bars: 72
+  max_holding_bars: 48        # time-based exit 48ч
+  non_overlapping: true       # 1 позиция на пару
+
+model:                        # раздел 3.6
+  algorithm: "xgboost"
+  base_params:
+    n_estimators: 500
+    max_depth: 6
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    reg_alpha: 0.1
+    reg_lambda: 1.0
+    random_state: 42
+  class_weighting: "sample_weight"   # НЕ scale_pos_weight (мультикласс!)
+
+optuna:                       # раздел 3.7
+  n_trials: 100               # в песочнице уменьшаем (см. Журнал разработки)
+  metric: "val_sharpe"
+
+walkforward:                  # раздел 3.8
+  n_splits: 5
+
+benchmarks:                   # раздел 3.10
+  n_runs: 1000
+  percentile_threshold: 0.95  # топ-5%
+
+pairs:                        # маппинг и издержки (раздел 0.5)
+  SOL_USDT: {ccxt: "SOL/USDT", bybit: "SOLUSDT", fee: 0.001, slippage: 0.0005}
+  BTC_USDT: {ccxt: "BTC/USDT", bybit: "BTCUSDT", fee: 0.001, slippage: 0.0003}
+  ETH_USDT: {ccxt: "ETH/USDT", bybit: "ETHUSDT", fee: 0.001, slippage: 0.0003}
