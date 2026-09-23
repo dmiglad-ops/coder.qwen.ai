@@ -1,10 +1,11 @@
 # 📋 АРХИТЕКТУРА ТОРГОВОЙ СИСТЕМЫ
-## Крипто-торговая система на базе ML (версия 3.0)
+## Крипто-торговая система на базе ML — версия 4.2 (финальная)
 
-**Версия документа:** 3.0 (финальная)  
+**Версия документа:** 4.2  
 **Дата:** 24 сентября 2026  
-**Статус:** Готов к ревью. Торговая пара: **SOL_USDT**  
-**Предшествующие версии:** 1.0, 2.0
+**Статус:** Финальный. Для передачи разработчику.  
+**Торговая пара:** SOL_USDT  
+**Биржа:** Bybit (Demo/Testnet для исполнения, Mainnet для данных)
 
 ---
 
@@ -17,19 +18,25 @@
 Это означает:
 - Сначала проверяем гипотезу на простых моделях (XGBoost/LightGBM)
 - Только если альфа подтверждена — строим систему
-- Если альфы нет — проект закрывается за 3 недели, а не за полгода
+- Если альфы нет — проект закрывается за 3-4 недели, а не за полгода
 - Каждое решение о переходе на следующую фазу должно быть **обосновано данными**
 
 ### 0.2. Бенчмарки (ОБЯЗАТЕЛЬНЫ)
 
-Каждая модель/стратегия **обязана** сравниваться с:
+Каждая модель/стратегия **обязана** сравниваться с четырьмя бенчмарками:
 
-| Бенчмарк | Описание | Что проверяет |
-|----------|----------|---------------|
-| **Buy & Hold** | Купил в начале периода, продал в конце | Есть ли альфа вообще |
-| **Случайные входы** | 1000 прогонов с случайными направлениями в те же моменты | Выбор момента |
-| **Перемешанные метки** | Те же таймстампы, случайные направления | Выбор направления |
-| **Простая стратегия** | Пересечение SMA 20/50 | Есть ли улучшение над наивным |
+| № | Бенчмарк | Что проверяет | Реализация |
+|---|----------|---------------|------------|
+| 1 | **Buy & Hold** | Есть ли альфа вообще | Купил в начале, продал в конце |
+| 2 | **Случайные таймстампы** | Выбор МОМЕНТА входа | Случайные таймстампы, направление как у модели |
+| 3 | **Перемешанные направления** | Выбор НАПРАВЛЕНИЯ | Таймстампы модели, случайное направление |
+| 4 | **Простая стратегия** | Улучшение над наивным | Пересечение SMA 20/50 |
+
+**ВАЖНО:** Бенчмарки №2 и №3 реализуются **по-разному**:
+- №2: случайные таймстампы + направление в том же соотношении, что у модели → проверяет навык выбора момента
+- №3: таймстампы модели + случайное направление → проверяет навык выбора направления
+
+**Бенчмарк №4 сравнивается ПО SHARPE, не по абсолютной доходности.**
 
 **Все метрики рассчитываются с учетом:**
 - Комиссии: 0.1% (тейкер)
@@ -82,11 +89,13 @@
 
 **Маппинг символов:**
 
-| Внутренний | ccxt | Bybit API | Отображение |
-|-----------|------|-----------|-------------|
-| `SOL_USDT` | `SOL/USDT` | `SOLUSDT` | SOL/USDT |
-| `BTC_USDT` | `BTC/USDT` | `BTCUSDT` | BTC/USDT |
-| `ETH_USDT` | `ETH/USDT` | `ETHUSDT` | ETH/USDT |
+| Внутренний | ccxt | Bybit API | Отображение | Комиссия | Проскальзывание |
+|-----------|------|-----------|-------------|----------|-----------------|
+| `SOL_USDT` | `SOL/USDT` | `SOLUSDT` | SOL/USDT | 0.1% | 0.05% |
+| `BTC_USDT` | `BTC/USDT` | `BTCUSDT` | BTC/USDT | 0.1% | 0.03% |
+| `ETH_USDT` | `ETH/USDT` | `ETHUSDT` | ETH/USDT | 0.1% | 0.03% |
+
+**Примечание:** Комиссии указаны консервативно (реально на Bybit тейкер ~0.055%). Проскальзывание параметризуется для каждой пары отдельно и пересматривается при добавлении каждой новой пары.
 
 ---
 
@@ -188,6 +197,8 @@ Phase 4: Полная инфраструктура
 | Батчинг | **Обязателен** с Phase 3 | Один вызов модели на все пары вместо 40 |
 | Свечи | **Только закрытые** | Незакрытая свеча = будущая информация |
 | Веб-дашборд | **С Phase 2**, не раньше | Для фаз 0-1 достаточно HTML отчета |
+| Позиции | **Максимум 1 на пару** | Корректность статистики |
+| Вход | **Симметричный** (лонг + шорт) | Избегаем фандинга на лонг-онли |
 
 ### 1.4. Защита позиций (КРИТИЧНО)
 
@@ -210,10 +221,25 @@ EXCHANGE-NATIVE стопы (ставятся ВСЕГДА на бирже):
 ├── Продолжает reconciliation (чтобы видеть, что закрылось по стопу)
 └── Ждет ручного вмешательства
 
-ВАЖНО:
-- Биржа может закрыть позицию по стопу, пока система мертва
-- Reconciliation должен корректно обрабатывать такие случаи
-- Это НЕ нарушение принципа "не закрывать" — это защита биржи
+АВАРИЙНЫЙ РЕЖИМ (только при явной настройке):
+├── Настраивается в конфиге:
+│   └── emergency_close_on_unavailable: false (по умолчанию)
+├── Если включено: при недоступности > 10 мин → попытка закрыть
+└── Только через отдельный канал (резервный API)
+
+НИКОГДА:
+├── НЕ закрывать позиции автоматически без настройки
+├── НЕ закрывать позиции при обычной паузе
+└── НЕ принимать решений за пользователя
+```
+
+**Конфигурация:**
+```yaml
+# config/risk.yaml
+emergency:
+  close_on_exchange_unavailable: false  # По умолчанию отключено
+  unavailable_timeout_minutes: 10       # Через сколько минут считать недоступной
+  backup_api_enabled: false             # Резервный канал для аварийного закрытия
 ```
 
 ---
@@ -247,6 +273,10 @@ project_root/
 │   │       │   ├── oscillator_features.parquet
 │   │       │   └── volume_features.parquet
 │   │       └── ...
+│   │
+│   ├── oos_final/                           # ЗАМОРОЖЕННЫЙ OOS
+│   │   ├── SOL_USDT_1h_final.parquet       # chmod 400
+│   │   └── README.md                        # Описание защиты
 │   │
 │   ├── realtime/                            # Live-данные (буфер)
 │   │   └── SOL_USDT_1h_latest.parquet
@@ -296,7 +326,7 @@ project_root/
         └── SOL_USDT.yaml
 ```
 
-### 2.2. Схема SQLite (упрощенная)
+### 2.2. Схема SQLite
 
 ```sql
 -- ============================================
@@ -324,6 +354,7 @@ CREATE TABLE models (
     oos_win_rate REAL,
     oos_profit_factor REAL,
     oos_total_trades INTEGER,
+    oos_effective_n_trades INTEGER,         -- С учётом перекрытия
     
     -- Метрики бенчмарка
     benchmark_buyhold_sharpe REAL,
@@ -357,7 +388,7 @@ CREATE TABLE trades (
     pnl REAL,
     pnl_pct REAL,
     commission REAL,
-    funding_cost REAL,                      -- NEW: учет funding
+    funding_cost REAL,                      -- Учет funding
     
     -- Кто принял решение
     model_id INTEGER,
@@ -382,7 +413,7 @@ CREATE TABLE positions (
     stop_loss_price REAL,
     take_profit_price REAL,
     status TEXT DEFAULT 'open',
-    last_sync_time TIMESTAMP,               -- NEW: время последней сверки
+    last_sync_time TIMESTAMP,               -- Время последней сверки
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -399,13 +430,14 @@ CREATE TABLE backtests (
     -- Результаты модели
     total_return REAL,
     sharpe REAL,
-    t_statistic REAL,                       -- NEW
-    p_value REAL,                           -- NEW
+    t_statistic REAL,
+    p_value REAL,
     max_drawdown REAL,
     win_rate REAL,
     profit_factor REAL,
     total_trades INTEGER,
-    total_funding_cost REAL,                -- NEW
+    effective_n_trades INTEGER,             -- С учётом перекрытия
+    total_funding_cost REAL,
     
     -- Бенчмарки
     buyhold_return REAL,
@@ -511,9 +543,13 @@ DATA_CONFIG = {
     "val_start": "2024-07-01",
     "val_end": "2024-12-31",
     
-    # Тест (out-of-sample, используем ОДИН РАЗ)
-    "test_start": "2025-01-01",
-    "test_end": "2026-09-01",
+    # Итерационный OOS (можно смотреть много раз в фазе 1)
+    "oos_iterative_start": "2025-01-01",
+    "oos_iterative_end": "2026-02-28",
+    
+    # ЗАМОРОЖЕННЫЙ OOS (используется ОДИН РАЗ в самом конце)
+    "oos_final_start": "2026-03-01",
+    "oos_final_end": "2026-09-01",
     
     # Источник: Bybit MAINNET public API
     "source": "mainnet",
@@ -523,10 +559,37 @@ DATA_CONFIG = {
 }
 ```
 
-### 3.3. Фичи (базовый набор для старта)
+### 3.3. Разделение данных (КРИТИЧНО)
+
+```
+РАЗДЕЛЕНИЕ ДАННЫХ:
+
+2022-01-01 ──── 2024-06-30: TRAIN (обучение)
+2024-07-01 ──── 2024-12-31: VALIDATION (подбор гиперпараметров)
+2025-01-01 ──── 2026-02-28: OOS_ITERATIVE (итерации в фазе 1)
+2026-03-01 ──── 2026-09-01: OOS_FINAL (замороженный, финальный тест)
+
+ПРАВИЛА:
+- OOS_ITERATIVE можно смотреть сколько угодно раз
+  (это итерационные данные для фазы 1)
+- OOS_FINAL НЕ ТРОГАЕТ НИ ОДИН СКРИПТ до финального решения в фазе 2
+- Только один запуск на OOS_FINAL в самом конце
+
+ЗАЩИТА OOS_FINAL:
+1. Физическая: файлы в отдельной директории с правами chmod 400
+2. Хеш: SHA-256 хеш файлов записан в git
+3. Флаг: скрипт финального теста требует явный флаг --allow-final-oos
+
+Защита реализуется в коде:
+- Все скрипты фазы 0/1 проверяют, что не запрашивают период OOS_FINAL
+- Скрипт финального тестирования проверяет хеш файлов перед запуском
+- Флаг --allow-final-oos нужно передавать явно, не по умолчанию
+```
+
+### 3.4. Фичи (базовый набор для старта)
 
 ```python
-# Phase 0 фичи (15 фичей)
+# Phase 0 фичи (14-15 фичей)
 
 FEATURES = {
     # Трендовые (5 фичей)
@@ -553,16 +616,18 @@ FEATURES = {
         "vwap_deviation",        # Отклонение от VWAP
     ],
     
-    # Контекст (3 фичи)
+    # Контекст (2-3 фичи)
     "context": [
         "volatility_24h",        # Волатильность за 24 часа
         "trend_strength_4h",     # Сила тренда на 4h (закрытая свеча)
-        "hour_of_day",           # Час дня (для цикличности)
+        # "hour_of_day",         # Час дня — опционально, может быть шумом
+        # В 24/7 крипте час-дня эффекты слабые и нестабильные
+        # Проверяем в Phase 0: если вклад < 2% → выбрасываем
     ],
 }
 ```
 
-### 3.4. Метки (с учетом дисбаланса)
+### 3.5. Метки (с учетом дисбаланса)
 
 ```python
 def generate_labels(df, forward_period=24, atr_period=14):
@@ -601,53 +666,67 @@ def generate_labels(df, forward_period=24, atr_period=14):
     if class_counts.get(0, 0) > 0.70:
         print("ВНИМАНИЕ: сильный дисбаланс классов")
         print("Варианты решения:")
-        print("1. Использовать scale_pos_weight")
+        print("1. Использовать sample_weight (для мультикласса)")
         print("2. Перейти на бинарную задачу (long vs not-long)")
         print("3. Снизить порог до 1.5×ATR")
     
     return labels, class_counts
 ```
 
-### 3.5. Модель
+### 3.6. Модель
 
 ```python
 # Phase 0 модель: XGBoost (НЕ Laya!)
 
 import xgboost as xgb
+from sklearn.utils.class_weight import compute_class_weight
+import numpy as np
 
 
-def create_model(class_counts=None):
+def create_model_with_class_weights(X_train, y_train, X_val, y_val):
     """
-    Создание XGBoost модели с учетом дисбаланса.
+    Создание модели с корректировкой дисбаланса классов.
+    
+    ВАЖНО: Для мультикласса используем sample_weight, а не scale_pos_weight!
+    scale_pos_weight — это скаляр только для бинарной классификации.
     """
-    params = {
-        "n_estimators": 500,
-        "max_depth": 6,
-        "learning_rate": 0.05,
-        "subsample": 0.8,
-        "colsample_bytree": 0.8,
-        "reg_alpha": 0.1,
-        "reg_lambda": 1.0,
-        "random_state": 42,
-        "eval_metric": "mlogloss",
-        "early_stopping_rounds": 50,
-    }
+    # Вычисляем веса классов
+    classes = np.unique(y_train)
+    class_weights = compute_class_weight(
+        "balanced", 
+        classes=classes, 
+        y=y_train
+    )
     
-    # Корректировка весов классов при дисбалансе
-    if class_counts is not None:
-        if class_counts.get(0, 0) > 0.70:
-            # scale_pos_weight для XGBoost
-            scale_weights = {
-                0: 1.0,
-                1: class_counts[0] / class_counts[1],
-                2: class_counts[0] / class_counts[2]
-            }
-            params["scale_pos_weight"] = scale_weights
+    # Создаем веса для каждого образца
+    sample_weights = class_weights[np.searchsorted(classes, y_train)]
     
-    return xgb.XGBClassifier(**params)
+    # Модель
+    model = xgb.XGBClassifier(
+        n_estimators=500,
+        max_depth=6,
+        learning_rate=0.05,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        reg_alpha=0.1,
+        reg_lambda=1.0,
+        random_state=42,
+        eval_metric="mlogloss",
+        early_stopping_rounds=50,
+    )
+    
+    # Обучение с весами
+    model.fit(
+        X_train, y_train,
+        sample_weight=sample_weights,
+        eval_set=[(X_val, y_val)],
+        verbose=True
+    )
+    
+    return model
 ```
 
-### 3.6. Оптимизация гиперпараметров (ОБЯЗАТЕЛЬНО)
+### 3.7. Оптимизация гиперпараметров (ОБЯЗАТЕЛЬНО)
 
 ```python
 # Оптимизация через Optuna
@@ -660,7 +739,16 @@ def optimize_xgboost(X_train, y_train, X_val, y_val, n_trials=100):
     Подбор гиперпараметров через Optuna.
     
     Метрика: Sharpe на валидации.
+    
+    ВАЖНО: На OOS не смотрим никогда, даже для выбора метрики.
+    
+    ПРИМЕЧАНИЕ: Для дисбаланса классов используем sample_weight.
     """
+    # Вычисляем веса классов
+    classes = np.unique(y_train)
+    class_weights = compute_class_weight("balanced", classes=classes, y=y_train)
+    sample_weights = class_weights[np.searchsorted(classes, y_train)]
+    
     def objective(trial):
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 100, 1000),
@@ -678,7 +766,12 @@ def optimize_xgboost(X_train, y_train, X_val, y_val, n_trials=100):
             eval_metric="mlogloss",
             early_stopping_rounds=50
         )
-        model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=False)
+        model.fit(
+            X_train, y_train,
+            sample_weight=sample_weights,
+            eval_set=[(X_val, y_val)],
+            verbose=False
+        )
         
         # Метрика: Sharpe на валидации
         sharpe = calculate_sharpe_from_predictions(model, X_val, y_val)
@@ -690,14 +783,19 @@ def optimize_xgboost(X_train, y_train, X_val, y_val, n_trials=100):
     return study.best_params, study.best_value
 ```
 
-### 3.7. Walk-Forward валидация
+### 3.8. Walk-Forward валидация
 
 ```python
-def walk_forward_validation(data, model_class, n_splits=5, embargo=24):
+def walk_forward_validation(data, model_class, n_splits=5, embargo=72):
     """
     Walk-forward валидация с embargo.
     
-    Embargo: минимум 24 свечи между концом трейна и началом теста.
+    ВАЖНО: embargo должен покрывать МАКСИМАЛЬНЫЙ период удержания позиции!
+    Не только label horizon (24 свечи), но и exit policy (48ч = 48 свечей)
+    
+    embargo = max(forward_period, max_holding_period) + запас
+    При time-based exit 48ч и 1h-свечах: минимум 50 баров
+    Используем 72 бара (3 дня) с запасом
     """
     results = []
     
@@ -719,11 +817,14 @@ def walk_forward_validation(data, model_class, n_splits=5, embargo=24):
         model = model_class()
         model.fit(X_train, y_train)
         
-        # Оцениваем
+        # Оцениваем с учётом перекрытия сделок
         y_pred = model.predict(X_test)
         
-        # Статистическая значимость
-        trade_returns = calculate_trade_returns(y_pred, y_test, X_test)
+        # Бэктест с блокировкой входа при открытой позиции
+        trade_results = backtest_non_overlapping(y_pred, X_test, embargo=24)
+        
+        # Статистическая значимость с поправкой на автокорреляцию
+        trade_returns = [t["pnl_pct"] for t in trade_results]
         significance = evaluate_statistical_significance(trade_returns)
         
         fold_results = {
@@ -731,6 +832,7 @@ def walk_forward_validation(data, model_class, n_splits=5, embargo=24):
             "train_size": len(train_idx),
             "test_size": len(test_idx),
             "n_trades": significance["n_trades"],
+            "effective_n_trades": significance["effective_n_trades"],
             "sharpe": significance["sharpe"],
             "t_statistic": significance["t_statistic"],
             "p_value": significance["p_value"],
@@ -741,108 +843,270 @@ def walk_forward_validation(data, model_class, n_splits=5, embargo=24):
     return results
 ```
 
-### 3.8. Бенчмарки (обновленные)
+### 3.9. Бэктест с учётом перекрытия (КРИТИЧНО)
 
-```python
-def run_benchmarks(model, X_test, y_test, timestamps, n_random_runs=1000):
+```
+═══════════════════════════════════════════════════════════════════
+           БЭКТЕСТ С УЧЁТОМ ПЕРЕКРЫТИЯ СДЕЛОК
+═══════════════════════════════════════════════════════════════════
+
+ПРОБЛЕМА:
+- Метки смотрят на 24 свечи вперёд
+- Соседние метки перекрываются на 23 часа
+- Соседние "сделки" в симуляции тоже перекрываются
+- t-статистика без поправки завышается в разы
+- Эффективный размер выборки может быть в 5 раз меньше заявленного
+
+РЕШЕНИЕ (основное): Non-overlapping backtest
+
+В симуляции ЗАПРЕЩАТЬ вход, пока предыдущая позиция не закрыта.
+Это соответствует правилу "1 позиция на пару".
+
+Реальный N сделок = 100-200 за 20 месяцев (не 300+).
+Тогда t-статистика считается корректно.
+
+РЕШЕНИЕ (дополнительное): Block bootstrap
+
+Оценивать значимость через bootstrap по блокам длиной ≥ forward_period.
+
+def block_bootstrap_significance(trade_returns, block_size=24, n_bootstrap=1000):
     """
-    Запуск всех бенчмарков.
-    
-    Возвращает результаты модели и всех бенчмарков.
+    Block bootstrap для корректной оценки значимости.
     """
-    results = {}
+    n_blocks = len(trade_returns) // block_size
+    bootstrapped_means = []
     
-    # 1. Buy & Hold
-    buyhold = simulate_buyhold(X_test, timestamps)
-    results["buyhold"] = {
-        "total_return": buyhold["total_return"],
-        "sharpe": buyhold["sharpe"],
+    for _ in range(n_bootstrap):
+        # Случайные блоки
+        block_indices = np.random.choice(n_blocks, size=n_blocks, replace=True)
+        
+        # Собираем выборку из блоков
+        bootstrap_sample = []
+        for block_idx in block_indices:
+            start = block_idx * block_size
+            end = start + block_size
+            bootstrap_sample.extend(trade_returns[start:end])
+        
+        bootstrapped_means.append(np.mean(bootstrap_sample))
+    
+    # p-value: доля бутстрапов с средним <= 0
+    p_value = np.mean(np.array(bootstrapped_means) <= 0)
+    
+    return {
+        "mean": np.mean(trade_returns),
+        "p_value": p_value,
+        "ci_95": np.percentile(bootstrapped_means, [2.5, 97.5])
     }
-    
-    # 2. Случайные входы (много прогонов)
-    random_results = []
-    for _ in range(n_random_runs):
-        random_labels = np.random.choice([1, -1], size=len(X_test))
-        pnl = simulate_trading(random_labels, timestamps)
-        random_results.append(pnl)
-    
-    random_results = np.array(random_results)
-    results["random"] = {
-        "mean_return": random_results.mean(),
-        "std_return": random_results.std(),
-        "pnl_percentile_of_model": (random_results < model_pnl).mean() * 100,
-    }
-    
-    # 3. Перемешанные метки (те же таймстампы, случайные направления)
-    real_pnl = simulate_trading(model.predict(X_test), timestamps)
-    shuffled_pnls = []
-    for _ in range(n_random_runs):
-        shuffled_labels = np.random.choice([1, -1], size=len(X_test))
-        pnl = simulate_trading(shuffled_labels, timestamps)
-        shuffled_pnls.append(pnl)
-    
-    shuffled_pnls = np.array(shuffled_pnls)
-    results["shuffled"] = {
-        "model_pnl": real_pnl,
-        "shuffled_pnl_mean": shuffled_pnls.mean(),
-        "shuffled_pnl_std": shuffled_pnls.std(),
-        "model_percentile": (shuffled_pnls < real_pnl).mean() * 100,
-    }
-    
-    # 4. Простая стратегия (пересечение SMA)
-    sma_strategy = simulate_sma_cross(X_test, timestamps)
-    results["sma_cross"] = {
-        "total_return": sma_strategy["total_return"],
-        "sharpe": sma_strategy["sharpe"],
-    }
-    
-    return results
+
+РЕШЕНИЕ (альтернативное): Newey-West standard errors
+
+from statsmodels.regression.linear_model import OLS
+from statsmodels.tools import add_constant
+
+# Модель: return ~ 1 (константа)
+X = add_constant(np.ones(len(trade_returns)))
+model = OLS(trade_returns, X).fit(cov_type='HAC', cov_kwds={'maxlags': 24})
+
+# t-статистика с поправкой на автокорреляцию
+t_stat_corrected = model.tvalues[0]
+p_value_corrected = model.pvalues[0]
+
+ПРАВИЛО:
+- Основной метод: Non-overlapping backtest
+- Sanity check: Block bootstrap или Newey-West
+- Если результаты расходятся → использовать более консервативный
+
+═══════════════════════════════════════════════════════════════════
 ```
 
-### 3.9. Критерии успеха и остановки (KILL CRITERIA)
+### 3.10. Правильные бенчмарки
+
+```python
+def run_benchmarks_corrected(model, X_test, y_test, timestamps, n_runs=1000):
+    """
+    ПРАВИЛЬНАЯ реализация бенчмарков.
+    
+    Разделяем навыки:
+    - Бенчмарк 2: проверяет выбор МОМЕНТА
+    - Бенчмарк 3: проверяет выбор НАПРАВЛЕНИЯ
+    - Бенчмарк 4: сравниваем ПО SHARPE, не по абсолютной доходности
+    """
+    # Получаем предсказания модели
+    model_predictions = model.predict(X_test)
+    model_probabilities = model.predict_proba(X_test)
+    model_timestamps = timestamps[model_predictions != 0]
+    
+    # ────────────────────────────────────────────────────────────
+    # БЕНЧМАРК 1: Buy & Hold
+    # ────────────────────────────────────────────────────────────
+    buyhold = simulate_buyhold(X_test, timestamps)
+    
+    # ────────────────────────────────────────────────────────────
+    # БЕНЧМАРК 2: Случайные таймстампы, направление как у модели
+    # ────────────────────────────────────────────────────────────
+    # Проверяет: умеет ли модель выбирать МОМЕНТ входа?
+    
+    active_predictions = model_predictions[model_predictions != 0]
+    long_ratio = (active_predictions == 1).sum() / len(active_predictions)
+    
+    random_timestamp_results = []
+    for _ in range(n_runs):
+        random_indices = np.random.choice(len(X_test), size=len(model_timestamps), replace=False)
+        random_directions = np.where(
+            np.random.random(len(random_indices)) < long_ratio,
+            1, -1
+        )
+        
+        random_labels = np.zeros(len(X_test))
+        random_labels[random_indices] = random_directions
+        
+        pnl = simulate_trading(random_labels, timestamps)
+        random_timestamp_results.append(pnl)
+    
+    benchmark_2 = np.array(random_timestamp_results)
+    
+    # ────────────────────────────────────────────────────────────
+    # БЕНЧМАРК 3: Таймстампы модели, случайное направление
+    # ────────────────────────────────────────────────────────────
+    # Проверяет: умеет ли модель выбирать НАПРАВЛЕНИЕ?
+    
+    shuffled_direction_results = []
+    for _ in range(n_runs):
+        shuffled_labels = np.zeros(len(X_test))
+        shuffled_labels[model_timestamps] = np.random.choice(
+            [1, -1], size=len(model_timestamps)
+        )
+        
+        pnl = simulate_trading(shuffled_labels, timestamps)
+        shuffled_direction_results.append(pnl)
+    
+    benchmark_3 = np.array(shuffled_direction_results)
+    
+    # ────────────────────────────────────────────────────────────
+    # БЕНЧМАРК 4: Простая стратегия
+    # ────────────────────────────────────────────────────────────
+    # ВАЖНО: сравниваем ПО SHARPE, не по абсолютной доходности!
+    
+    sma_strategy = simulate_sma_cross(X_test, timestamps)
+    benchmark_4 = {
+        "total_return": sma_strategy["total_return"],
+        "sharpe": sma_strategy["sharpe"],
+        "max_drawdown": sma_strategy["max_drawdown"],
+        "model_better_by_sharpe": model_sharpe > sma_strategy["sharpe"],
+    }
+    
+    # ────────────────────────────────────────────────────────────
+    # РЕЗУЛЬТАТЫ
+    # ────────────────────────────────────────────────────────────
+    
+    model_pnl = simulate_trading(model_predictions, timestamps)
+    
+    return {
+        "model_pnl": model_pnl,
+        
+        "buyhold": buyhold,
+        
+        "benchmark_2_timing": {
+            "mean": benchmark_2.mean(),
+            "std": benchmark_2.std(),
+            "model_percentile": (benchmark_2 < model_pnl).mean() * 100,
+            "passes": (benchmark_2 < model_pnl).mean() > 0.95
+        },
+        
+        "benchmark_3_direction": {
+            "mean": benchmark_3.mean(),
+            "std": benchmark_3.std(),
+            "model_percentile": (benchmark_3 < model_pnl).mean() * 100,
+            "passes": (benchmark_3 < model_pnl).mean() > 0.95
+        },
+        
+        "benchmark_4_sma": benchmark_4,
+        
+        "interpretation": interpret_benchmarks(benchmark_2, benchmark_3, model_pnl)
+    }
+
+
+def interpret_benchmarks(benchmark_2, benchmark_3, model_pnl):
+    """
+    Интерпретация результатов бенчмарков.
+    """
+    passes_timing = (benchmark_2 < model_pnl).mean() > 0.95
+    passes_direction = (benchmark_3 < model_pnl).mean() > 0.95
+    
+    if passes_timing and passes_direction:
+        return "FULL ALPHA: модель умеет и момент, и направление"
+    elif passes_timing and not passes_direction:
+        return "TIMING ONLY: модель выбирает момент, но не направление"
+    elif not passes_timing and passes_direction:
+        return "DIRECTION ONLY: модель выбирает направление, но не момент"
+    else:
+        return "NO ALPHA: модель не лучше случайности"
+```
+
+### 3.11. Критерии успеха и остановки (KILL CRITERIA)
 
 **Критерии фиксируются ДО первого обучения:**
 
 ```
 ═══════════════════════════════════════════════════════════════════
-                     КРИТЕРИИ УСПЕХА (ГО/НОУ-ГО)
+           КРИТЕРИИ УСПЕХА (ГО/НОУ-ГО) — ВЕРСИЯ 4.2
 ═══════════════════════════════════════════════════════════════════
 
-✅ GO (продолжаем проект), если ВСЕ три условия выполнены:
+✅ ГО (продолжаем проект), если ВСЕ условия выполнены:
 
-1. OOS-доходность модели (после комиссий и funding) > 
-   Buy & Hold + 10 п.п. за период 2025-01-01 → 2026-09-01
+1. Риск-скорректированная доходность:
+   - Sharpe модели > Sharpe buy & hold + 0.3
+   - MaxDD модели < MaxDD buy & hold
+   - Information Ratio > 0.5:
+     IR = (return_model − return_buyhold) / tracking_error
+   - Return модели > 0 (абсолютно, не относительно)
 
-2. Статистическая значимость:
-   - Количество сделок в OOS ≥ 300
-   - t-статистика средней доходности на сделку > 2.0
+2. Статистическая значимость (с учётом перекрытия сделок):
+   - Количество НЕЗАВИСИМЫХ сделок в OOS ≥ 100
+     (сделки считаются независимыми только если между ними
+      минимум 24 свечи без перекрытия)
+   - Если сделок < 300: требуется t-статистика > 2.5
+   - Если сделок ≥ 300: достаточно t-статистики > 2.0
+   - t-статистика считается с поправкой на автокорреляцию
+     (Newey-West или block bootstrap)
    - p-value < 0.05
-   - Медиана Sharpe по фолдам walk-forward > 0
 
 3. Бенчмарки:
-   - Модель в топ-5% распределения случайных результатов
-   - Модель лучше перемешанных меток (95-й процентиль)
-   - Модель лучше простой стратегии (пересечение SMA)
+   - Модель в топ-5% распределения случайных таймстампов (№2)
+   - Модель в топ-5% распределения случайных направлений (№3)
+   - Модель лучше простой стратегии (пересечение SMA) ПО SHARPE
+     (не по абсолютной доходности)
+   - Интерпретация: "FULL ALPHA" или хотя бы "TIMING + DIRECTION"
 
-❌ NO-GO (закрываем проект за 3 недели), если:
+4. Устойчивость:
+   - Все фолды walk-forward имеют положительный результат
+     (нет фолдов с отрицательным Sharpe)
+   - Коэффициент вариации фолдов < 0.5:
+     std(sharpe_folds) / |mean(sharpe_folds)| < 0.5
+
+5. Валидность модели:
+   - Одна фича НЕ даёт > 90% вклада в предсказание
+   - Знак зависимости НЕ скачет между фолдами
+   - В фичах НЕ обнаружен look-ahead
+
+❌ НОУ-ГО (закрываем проект за 3-4 недели):
 
 - Любое из условий выше не выполнено
-- Не можем сформулировать, ПОЧЕМУ модель работает
-- Результаты нестабильны:
-  - Разброс между фолдами > 50%
-  - Модель показывает разные результаты на разных режимах рынка
+- Одна фича даёт > 90% вклада в предсказание
+- Обнаружен look-ahead в SHAP анализе
+- Модель лучше только одного бенчмарка из трёх
 
 ⚠️ ДИАГНОСТИКА (не влияет на решение, но нужно исследовать):
 
-- Win Rate < 52% → возможно, проблема с качеством фичей
-- Profit Factor < 1.3 → слабая альфа, но может быть
-- Максимальный drawdown > 20% → высокий риск
-- Разброс между фолдами > 30% → нестабильность
+- Одна фича даёт 50-90% вклада → исследовать, но не закрывать
+- Разброс фолдов > 0.6 → проверить стабильность
+- Модель работает только на одном режиме рынка → проверить на других
+- Доверительный интервал Sharpe шире ±0.5 → набрать больше сделок
 
 ═══════════════════════════════════════════════════════════════════
 ```
 
-### 3.10. Визуализация результатов
+### 3.12. Визуализация результатов
 
 **Вместо дашборда в Phase 0 — HTML отчет с matplotlib:**
 
@@ -850,28 +1114,45 @@ def run_benchmarks(model, X_test, y_test, timestamps, n_random_runs=1000):
 def generate_phase0_report(results, output_path):
     """
     Генерация HTML отчета для принятия решения.
+    
+    Разделы отчета:
+    1. Equity curve модели vs buy & hold
+    2. Сравнение с бенчмарками (4 типа)
+    3. Распределение случайных результатов
+    4. Интерпретация бенчмарков
+    5. Анализ фандинга по сторонам
+    6. Метрики в табличном виде
     """
     import matplotlib.pyplot as plt
     
-    fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+    fig, axes = plt.subplots(3, 3, figsize=(24, 18))
     
-    # 1. Equity curve модели
-    plot_equity_curve(results["model"], ax=axes[0, 0])
+    # 1. Equity curve
+    plot_equity_curve(results, ax=axes[0, 0])
     
-    # 2. Сравнение с бенчмарками
-    plot_benchmark_comparison(results, ax=axes[0, 1])
+    # 2. Сравнение с buy & hold
+    plot_buyhold_comparison(results, ax=axes[0, 1])
     
-    # 3. Distribution of random results vs model
-    plot_distribution(results["random"], results["model_pnl"], ax=axes[0, 2])
+    # 3. Бенчмарк 2: распределение случайных таймстампов
+    plot_timing_benchmark(results["benchmark_2_timing"], ax=axes[0, 2])
     
-    # 4. Walk-forward results
-    plot_walkforward(results["walkforward"], ax=axes[1, 0])
+    # 4. Бенчмарк 3: распределение перемешанных направлений
+    plot_direction_benchmark(results["benchmark_3_direction"], ax=axes[1, 0])
     
-    # 5. Feature importance
-    plot_feature_importance(results["feature_importance"], ax=axes[1, 1])
+    # 5. Walk-forward results
+    plot_walkforward(results["walkforward"], ax=axes[1, 1])
     
-    # 6. Метрики в табличном виде
-    plot_metrics_table(results["metrics"], ax=axes[1, 2])
+    # 6. Feature importance
+    plot_feature_importance(results["feature_importance"], ax=axes[1, 2])
+    
+    # 7. Анализ фандинга по сторонам
+    plot_funding_analysis(results["funding_by_side"], ax=axes[2, 0])
+    
+    # 8. Метрики
+    plot_metrics_table(results["metrics"], ax=axes[2, 1])
+    
+    # 9. Интерпретация
+    plot_interpretation(results["interpretation"], ax=axes[2, 2])
     
     plt.tight_layout()
     
@@ -907,11 +1188,49 @@ def generate_phase0_report(results, output_path):
 
 4. Сезонность:
    ├── День недели
-   ├── Час дня (уже есть)
+   ├── Час дня (уже есть, но проверяем значимость)
    └── Фаза месяца (для цикличности)
+
+5. Режим рынка:
+   ├── Тренд на 1d (сильный/слабый/боковой)
+   └── Волатильность на 1d (низкая/средняя/высокая)
 ```
 
-### 4.2. Ансамбль моделей
+### 4.2. Правильный мульти-ТФ без look-ahead (КРИТИЧНО)
+
+```python
+def merge_multitimeframe_correctly(df_1h, df_4h):
+    """
+    ПРАВИЛЬНОЕ объединение мульти-таймфреймовых данных.
+    
+    КРИТИЧНО: используем merge_asof с direction="backward",
+    чтобы избежать look-ahead.
+    """
+    # Вычисляем время закрытия 4h свечи
+    df_4h["close_time"] = df_4h["timestamp"] + 4 * 3600 * 1000  # ms
+    
+    # Для каждой 1h свечи берём последнюю ЗАКРЫТУЮ 4h свечу
+    # Это происходит ДО момента времени 1h свечи
+    df_merged = pd.merge_asof(
+        df_1h.sort_values("timestamp"),
+        df_4h[["close_time", "ema_20", "ema_50", "atr_14", "adx"]].sort_values("close_time"),
+        left_on="timestamp",
+        right_on="close_time",
+        direction="backward"  # Только закрытые свечи!
+    )
+    
+    # Переименовываем колонки для ясности
+    df_merged = df_merged.rename(columns={
+        "ema_20": "ema_20_4h",
+        "ema_50": "ema_50_4h",
+        "atr_14": "atr_14_4h",
+        "adx": "adx_4h"
+    })
+    
+    return df_merged
+```
+
+### 4.3. Ансамбль моделей
 
 ```
 Ансамбль из разных типов моделей:
@@ -924,7 +1243,7 @@ def generate_phase0_report(results, output_path):
 Веса ансамбля подбираются на валидации.
 ```
 
-### 4.3. Калибровка вероятностей
+### 4.4. Калибровка вероятностей
 
 ```python
 from sklearn.calibration import CalibratedClassifierCV
@@ -933,10 +1252,6 @@ from sklearn.calibration import CalibratedClassifierCV
 def calibrate_model(model, X_val, y_val):
     """
     Калибровка вероятностей модели.
-    
-    После калибровки:
-    - Если модель предсказывает P(long) = 0.80
-    - То в реальности она должна быть права в 80% случаев
     """
     calibrated_model = CalibratedClassifierCV(
         model, 
@@ -954,14 +1269,14 @@ def calibrate_model(model, X_val, y_val):
     return calibrated_model
 ```
 
-### 4.4. Порог уверенности (по PR-кривой)
+### 4.5. Порог уверенности (по PR-кривой)
 
 ```python
 def find_optimal_threshold(y_val, y_prob, method="expected_value"):
     """
     Подбор оптимального порога по PR-кривой.
     
-    НЕ берем 0.70 с потолка!
+    НЕ берем фиксированное значение с потолка!
     """
     thresholds = np.linspace(0.5, 0.9, 20)
     best_threshold = 0.5
@@ -992,15 +1307,24 @@ def find_optimal_threshold(y_val, y_prob, method="expected_value"):
     return best_threshold, best_score
 ```
 
-### 4.5. ATR-based SL/TP
+### 4.6. ATR-based SL/TP
 
 ```python
 def optimize_stops(X_train, y_train, X_val, y_val, n_trials=50):
     """
     Подбор ATR-based стопов через grid search.
     
-    SL = k × ATR (k подбирается)
-    TP = m × ATR (m подбирается)
+    ВАЖНО: Согласованность меток и стопов!
+    
+    Проблема:
+    - Метки: 2×ATR-барьер за 24 часа
+    - Выход: SL/TP/48 часов
+    - Это разные правила выхода
+    
+    Решение:
+    - При подборе SL/TP проверяем согласованность
+    - Если оптимизированные стопы меняют исходы против меток →
+      переразмечаем под реальный экзит
     """
     best_params = None
     best_sharpe = -np.inf
@@ -1020,25 +1344,23 @@ def optimize_stops(X_train, y_train, X_val, y_val, n_trials=50):
                 best_sharpe = sharpe
                 best_params = {"sl_k": k, "tp_m": m}
     
+    # Проверяем согласованность
+    check_label_stop_consistency(X_val, y_val, best_params)
+    
     return best_params, best_sharpe
 ```
 
-### 4.6. Exit Policy
+### 4.7. Exit Policy
 
 ```python
 class ExitPolicy:
     """
     Политика выхода из позиции (в дополнение к биржевым стопам).
-    
-    ВАЖНО: Стопы на бирже ставятся ВСЕГДА (защита при падении процесса).
-    Дополнительные условия выхода применяются только в режиме RUNNING.
     """
     
     def check_exit(self, position, current_data, model_signal):
         """
         Проверка дополнительных условий выхода.
-        
-        Возвращает причину выхода или None.
         """
         # 1. Time-based: закрыть через 48ч если нет TP
         if hours_since_entry(position) > 48:
@@ -1058,16 +1380,45 @@ class ExitPolicy:
         return None
 ```
 
-### 4.7. Финальный OOS тест
+### 4.8. Мульти-актив валидация (ОБЯЗАТЕЛЬНАЯ)
 
 ```
-Финальный OOS тест на 2025-2026:
+МУЛЬТИ-АКТИВ ВАЛИДАЦИЯ (обязательный шаг в фазе 1):
 
-1. Обучаем модель на 2022-2024 (с новыми фичами и гиперпараметрами)
+Процесс:
+1. Обучить модель на SOL
+2. Применить БЕЗ ПЕРЕОБУЧЕНИЯ к:
+   - ETH/USDT
+   - BTC/USDT
+3. Сравнить результаты
+
+Интерпретация:
+- Если на других активах падение < 30% → фичи универсальны
+- Если падение > 50% → модель переобучена на SOL
+- Если падение 30-50% → пограничный случай, исследовать
+
+Критерий перехода к фазе 2:
+- Модель на SOL проходит все критерии
+- Модель на других активах: падение < 50%
+- Если падение > 50% → вернуться к фичам, не идти в фазу 2
+```
+
+### 4.9. Финальный OOS тест
+
+```
+Финальный OOS тест на замороженном срезе:
+
+1. Обучаем модель на 2022-2024
 2. Калибруем на валидации 2024-07-01 → 2024-12-31
-3. Тестируем на 2025-01-01 → 2026-09-01 (ОДИН РАЗ)
-4. Сравниваем с бенчмарками
-5. Если лучше всех бенчмарков → переходим к Phase 2
+3. Итерации на OOS_ITERATIVE (2025-01-01 → 2026-02-28)
+4. ФИНАЛЬНЫЙ тест на OOS_FINAL (2026-03-01 → 2026-09-01)
+   - Этот запуск делаем ОДИН РАЗ
+   - Только после того, как все итерации завершены
+   - Только после мульти-актив валидации
+   - Только с явным флагом --allow-final-oos
+   - Проверяем хеш файлов перед запуском
+5. Сравниваем с бенчмарками
+6. Если лучше всех бенчмарков → переходим к Phase 2
 ```
 
 ---
@@ -1098,8 +1449,14 @@ class ExitPolicy:
 │  │     └── Калиброванная вероятность                        │  │
 │  │                                                          │  │
 │  │  5. Проверка порога (по PR-кривой)                       │  │
-│  │     └── Если порог превышен → сигнал                     │  │
-│  │     └── Если нет → пропуск                               │  │
+│  │     └── Симметричный вход:                               │  │
+│  │         ├── Если P(long) > θ → сигнал на лонг            │  │
+│  │         ├── Если P(short) > θ → сигнал на шорт           │  │
+│  │         └── Если нет → пропуск                           │  │
+│  │                                                          │  │
+│  │  ВАЖНО: Вход симметричный!                               │  │
+│  │  Если модель только лонг → она платит фандинг каждые 8ч  │  │
+│  │  Это может съесть всю прибыль.                           │  │
 │  │                                                          │  │
 │  │  6. Риск-менеджмент                                      │  │
 │  │     └── Проверка лимитов                                 │  │
@@ -1121,7 +1478,7 @@ class ExitPolicy:
 │  └──────────────────────────────────────────────────────────┘  │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │  Web Dashboard (FastAPI) — ПОЯВЛЯЕТСЯ В ФАЗЕ 2!         │  │
+│  │  Web Dashboard (FastAPI)                                  │  │
 │  │  ├── Статус системы                                      │  │
 │  │  ├── Текущая позиция                                     │  │
 │  │  ├── История сделок                                      │  │
@@ -1131,7 +1488,39 @@ class ExitPolicy:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 5.2. Обработка ошибок
+### 5.2. Позиционный размер
+
+```
+ПОЗИЦИОННЫЙ РАЗМЕР (для фазы 2):
+
+Базовый метод: Volatility-adjusted
+
+Формула:
+  position_size = base_size × (target_volatility / current_atr_pct)
+
+Где:
+  base_size = 3% (базовый размер позиции)
+  target_volatility = 2% (целевая волатильность)
+  current_atr_pct = ATR_14 / close × 100 (текущая волатильность в %)
+
+Ограничения:
+  Минимальный размер: 1%
+  Максимальный размер: 5%
+
+Пример:
+  Если ATR = 3$ при цене 150$ → волатильность 2%
+  → размер = 3% × (2% / 2%) = 3%
+  
+  Если ATR = 4.5$ при цене 150$ → волатильность 3%
+  → размер = 3% × (2% / 3%) = 2%
+  
+  Если ATR = 1.5$ при цене 150$ → волатильность 1%
+  → размер = 3% × (2% / 1%) = 6% (но максимум 5%)
+
+ПРАВИЛО: Максимум 1 открытая позиция на пару.
+```
+
+### 5.3. Обработка ошибок
 
 **При любой поломке:**
 1. ✅ Уведомить пользователя (МАКС бот / лог)
@@ -1140,59 +1529,7 @@ class ExitPolicy:
 4. ⏸️ Перевести систему в режим **PAUSED**
 5. 👤 Ждать ручного вмешательства
 
-**ВАЖНО:** Стопы на бирже остаются активными и могут закрыть позицию без участия системы. Это нормально и это защита.
-
-### 5.3. Веб-дашборд для Phase 2
-
-```
-┌─────────────────────────────────────────────────────────────────┐
-│  TRADING DASHBOARD                                    [SOL_USDT]│
-├─────────────────────────────────────────────────────────────────┤
-│                                                                  │
-│  Статус: 🟢 RUNNING    Uptime: 2h 34m    PnL сегодня: +$45.20  │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  ОТКРЫТАЯ ПОЗИЦИЯ                                        │   │
-│  │  ├── Направление: LONG                                   │   │
-│  │  ├── Вход: $142.50                                       │   │
-│  │  ├── Текущая: $144.20                                    │   │
-│  │  ├── PnL: +$1.70 (+1.2%)                                │   │
-│  │  ├── Стоп: $139.65 (на бирже)                            │   │
-│  │  ├── Тейк: $148.20 (на бирже)                            │   │
-│  │  └── Открыта: 2026-09-24 10:00                          │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  МЕТРИКИ                                                 │   │
-│  │  ├── Сегодня: +$45.20 (2 сделки)                        │   │
-│  │  ├── Неделя: +$128.50 (8 сделок, 75% win)               │   │
-│  │  ├── Всего: +$342.80 (23 сделки, 56% win)               │   │
-│  │  └── Max Drawdown: 3.2%                                  │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  ПОСЛЕДНИЕ СДЕЛКИ                                        │   │
-│  │  #23 | LONG  | +$22.50 | 24.09 14:00 → 24.09 18:00    │   │
-│  │  #22 | SHORT | -$8.30  | 24.09 10:00 → 24.09 12:00    │   │
-│  │  #21 | LONG  | +$35.10 | 23.09 22:00 → 24.09 04:00    │   │
-│  │  [Показать все →]                                        │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  СИГНАЛЫ МОДЕЛИ (последние 24 часа)                      │   │
-│  │  10:00 | P(long)=0.78 | ✅ Вход                          │   │
-│  │  09:00 | P(long)=0.52 | ⏭ Пропуск                       │   │
-│  │  08:00 | P(long)=0.45 | ⏭ Пропуск                       │   │
-│  │  07:00 | P(long)=0.71 | ✅ Вход (стоп сработал)         │   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                  │
-│  ┌─────────────────────────────────────────────────────────┐   │
-│  │  УПРАВЛЕНИЕ                                              │   │
-│  │  [⏸ Пауза]  [🔄 Перезапуск]  [📊 Бэктест]  [⚙ Настройки]│   │
-│  └─────────────────────────────────────────────────────────┘   │
-│                                                                  │
-└─────────────────────────────────────────────────────────────────┘
-```
+**ВАЖНО:** Стопы на бирже остаются активными и могут закрыть позицию. Это нормально и это защита.
 
 ---
 
@@ -1330,19 +1667,7 @@ class ExitPolicy:
 /alerts                    → История алертов
 ```
 
-### 8.2. Ключевые функции
-
-| Страница | Функции |
-|----------|---------|
-| `/` | Статус системы, открытые позиции, PnL дня |
-| `/models` | Список моделей, сравнение метрик, архивация |
-| `/models/train` | Запуск обучения с параметрами |
-| `/pairs/{symbol}` | Привязка моделей к паре, настройка весов |
-| `/backtests/run` | Выбор модели, периода, запуск бэктеста |
-| `/dashboard` | Equity curve, метрики, графики |
-| `/settings` | Настройки риск-менеджмента, алертов |
-
-### 8.3. Технологии
+### 8.2. Технологии
 
 ```
 Backend:
@@ -1356,9 +1681,6 @@ Frontend:
 ├── JavaScript (vanilla или легкий фреймворк)
 ├── Chart.js или Plotly (графики)
 └── WebSocket (реалтайм обновления)
-
-Запуск:
-└── Одна команда: `python dashboard.py --port 8000`
 ```
 
 ---
@@ -1429,15 +1751,31 @@ Frontend:
 
 | Ошибка | Действие | Алерт | Режим |
 |--------|----------|-------|-------|
-| Биржа недоступна > 30 сек | Пауза торговли | CRITICAL | PAUSED |
-| Биржа недоступна > 5 мин | Пауза + закрытие позиций | CRITICAL | PAUSED |
+| Биржа недоступна > 30 сек | Пауза торговли | WARNING | PAUSED |
+| Биржа недоступна > 5 мин | Пауза + сверка | CRITICAL | PAUSED |
 | Модель не отвечает > 10 сек | Перезапуск модели | WARNING | RUNNING |
 | Модель не отвечает > 60 сек | Пауза | CRITICAL | PAUSED |
 | Расхождение цен > 0.5% | Пауза торговли | WARNING | PAUSED |
 | Дневной лимит убытков достигнут | Пауза торговли | CRITICAL | PAUSED |
 | Непредвиденная ошибка | Пауза + логирование | CRITICAL | PAUSED |
 
-### 9.4. Периодическая сверка
+**Примечание:** "Закрытие позиций" при недоступности биржи **НЕ выполняется** по умолчанию. Только если явно включено в конфиге (см. раздел 1.4).
+
+### 9.4. Дневные лимиты
+
+```yaml
+# config/risk.yaml
+daily:
+  max_loss_pct: 0.03              # 3% от баланса максимум в день
+  max_trades: 10                   # Максимум 10 сделок в день
+  max_consecutive_losses: 3        # Максимум 3 убыточных подряд
+  
+  # Сброс счётчиков
+  reset_time: "UTC"               # Сброс в полночь UTC
+  # НЕ локальное время! Иначе будет двойной счёт или недосчёт
+```
+
+### 9.5. Периодическая сверка
 
 ```python
 class PositionTracker:
@@ -1461,9 +1799,6 @@ class PositionTracker:
     def reconcile(self, exchange_positions):
         """
         Синхронизация локального состояния с биржей.
-        
-        ВАЖНО: позиции могут закрываться на бирже по стопам,
-        пока система работает. Нужно корректно это обрабатывать.
         """
         # Позиции на бирже, которых нет локально
         for ep in exchange_positions:
@@ -1475,7 +1810,6 @@ class PositionTracker:
         for lp_id, lp in list(self.local_positions.items()):
             if lp_id not in [ep.id for ep in exchange_positions]:
                 logger.info(f"Позиция закрылась (возможно по стопу): {lp}")
-                # Закрываем сделку в базе
                 self.close_trade(lp_id, reason="closed_on_exchange")
                 del self.local_positions[lp_id]
 ```
@@ -1512,28 +1846,62 @@ class PositionTracker:
 ```
 Политика переобучения:
 
-Частота: раз в 4 недели
+Частота: раз в 8-12 недель (не 4!)
+
+Обоснование:
+- При 30-месячном окне новые 4 недели = 0.3% данных
+- Модель почти не изменится
+- Затраты на retrain + калибровку + shadow — реальные
 
 Train window: rolling last 30 месяцев
 OOS window: последние 3 месяца (которых не было в train)
 
+Триггеры для внепланового переобучения:
+1. Дрейф данных: KL-дивергенция > порога
+2. Live Sharpe упал ниже backtest Sharpe на 30%+
+3. Калибровка деградировала: ECE > 0.10
+
 Процесс:
 1. Обучить новую версию на актуальных данных
 2. Калибровка на валидации (3 месяца)
-3. Если лучше текущей → SHADOW MODE (1-2 недели)
+3. Если лучше текущей → SHADOW MODE (6-8 недель, не 1-2!)
    ├── Новая модель считает решения параллельно
    ├── НЕ торгует, только логирует
-   └── Сравниваем hypothetical PnL с реальной моделью
+   └── Сравниваем с реальной моделью
 4. Если shadow результаты лучше → PROMOTE в prod
 5. Если хуже → DISCARD
 
 ВАЖНО:
-- OOS window всегда свежие данные, которых не было в train
-- Перед промоушеном — обязательный shadow testing
-- Если live Sharpe новой модели < 0.5 за 2 недели → откат
+- Shadow минимум 6-8 недель для осмысленного сравнения
+- Если сделок < 30 → продлить до набора
+- Параллельно логировать ВСЕ сигналы (не только выше порога)
 ```
 
-### 10.3. Funding Fees
+### 10.3. Пере-калибровка
+
+```
+ПЕРЕ-КАЛИБРОВКА:
+
+Частота: раз в 8 недель или при триггерах
+
+ВАЖНО: Пере-калибровка должна быть согласована с retraining!
+
+Если калибровка обновляется чаще модели:
+- Используем один и тот же валидационный набор всё чаще
+- Это может привести к переобучению калибровки
+
+Решение:
+- Калибруем только при retraining (раз в 8-12 недель)
+- ИЛИ используем отдельный валидационный набор для калибровки
+- НЕ используем OOS данные для калибровки
+
+Триггеры для внеплановой пере-калибровки:
+1. ECE (Expected Calibration Error) > 0.10 на последних 100 сделках
+2. Дрейф данных: z-score любой фичи > 3.0
+3. Разница между предсказанной и реальной частотой событий > 15%
+```
+
+### 10.4. Funding Fees
 
 ```
 Учет funding в бэктесте и в живой торговле:
@@ -1543,6 +1911,8 @@ funding_cost = position_value × funding_rate × (holding_hours / 8)
 
 Исторические данные:
 └── Bybit API /v5/market/funding/history
+└── Пагинация: ~200 записей за запрос
+└── С 2022 года: ~9-10 запросов на пару
 
 В бэктесте:
 ├── Для каждой позиции считаем количество выплат
@@ -1553,16 +1923,52 @@ funding_cost = position_value × funding_rate × (holding_hours / 8)
 ├── Мониторим текущий funding
 ├── При приближении времени выплаты → учитываем
 └── Включаем в итоговый PnL
+
+ВАЖНО:
+- Используем ИСТОРИЧЕСКИЙ funding на момент удержания позиции
+- НЕ текущий (иначе искажение)
 ```
 
-### 10.4. Data Drift Monitoring
+### 10.5. Анализ фандинга по сторонам
+
+```
+В HTML-ОТЧЁТ ДОБАВЛЯЕТСЯ:
+
+Раздел "Анализ фандинга по сторонам":
+
+┌─────────────────────────────────────────────────────────────┐
+│  АНАЛИЗ ФАНДИНГА                                            │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  Общий фандинг за период: -2.3% (лонги платят)              │
+│                                                              │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │ Сторона   │ Кол-во │ Средний │ Фандинг │ Чистый    │   │
+│  │           │ сделок │ PnL     │ cost    │ PnL       │   │
+│  ├─────────────────────────────────────────────────────┤   │
+│  │ Long      │ 45     │ +4.2%   │ -1.8%   │ +2.4%     │   │
+│  │ Short     │ 32     │ +2.1%   │ +1.2%   │ +3.3%     │   │
+│  └─────────────────────────────────────────────────────┘   │
+│                                                              │
+│  ⚠️ ВНИМАНИЕ: Лонги теряют на фандинге                      │
+│     Если бы все сделки были лонг → чистый +2.4%            │
+│     Если бы все были шорт → чистый +3.3%                    │
+│                                                              │
+│  Рекомендация: модель должна балансировать стороны           │
+│                или учитывать фандинг при принятии решений    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 10.6. Data Drift Monitoring
 
 ```
 Мониторинг дрейфа данных:
 
 Что мониторим:
 ├── Средние/дисперсии фичей в проде vs трейне
-├── Если KL-дивергенция выше порога → алерт
+├── Для bounded фичей (RSI, CCI): используем MAD вместо z-score
+├── Для тяжелохвостых фичей: Mann-Whitney U тест
 └── Регулярно (раз в неделю) считаем live Sharpe vs backtest
 
 Алгоритм:
@@ -1571,33 +1977,14 @@ funding_cost = position_value × funding_rate × (holding_hours / 8)
      'feature_name': {'mean': x, 'std': y, 'min': a, 'max': b}
    }
 
-2. В проде для каждой фичи считаем z-score:
-   z_score = (live_value - train_mean) / train_std
+2. В проде для каждой фичи считаем отклонение:
+   - Для bounded: MAD-based z-score
+   - Для остальных: обычный z-score
 
-3. Если |z_score| > 3.0 → WARNING алерт
-4. Если |z_score| > 5.0 → CRITICAL алерт + пауза торговли
+3. Если отклонение > 3.0 → WARNING алерт
+4. Если отклонение > 5.0 → CRITICAL алерт + пауза торговли
 
 Частота проверки: каждый час
-```
-
-### 10.5. Периодическая сверка
-
-```
-Сверка с биржей:
-
-Частота: каждый час (в режиме RUNNING)
-В режиме PAUSED: каждые 5 минут
-
-Что сверяем:
-├── Открытые позиции
-├── Ордера
-├── Баланс
-└── Закрытые позиции (по стопам/тейкам)
-
-При расхождении:
-├── Логируем
-├── Обновляем локальное состояние
-└── Отправляем алерт (если критично)
 ```
 
 ---
@@ -1613,13 +2000,15 @@ funding_cost = position_value × funding_rate × (holding_hours / 8)
    ├── Индикаторы
    ├── Риск-менеджмент
    ├── Сериализация
-   └── Маппинг символов
+   ├── Маппинг символов
+   └── Мульти-ТФ объединение (проверка отсутствия look-ahead)
 
 2. Integration:
    ├── Пайплайн данных
    ├── Инференс модели
    ├── Исполнение ордеров (на testnet)
-   └── Reconciliation
+   ├── Reconciliation
+   └── Периодическая сверка
 
 3. Бэктест сценарии:
    ├── Бычий рынок (2024)
@@ -1652,23 +2041,25 @@ funding_cost = position_value × funding_rate × (holding_hours / 8)
 
 **Задачи:**
 - [ ] Сбор исторических данных SOL_USDT 1h (mainnet API)
-- [ ] Сбор funding rates
-- [ ] Расчет 15 базовых индикаторов
-- [ ] Генерация меток с учетом волатильности
+- [ ] Сбор funding rates (с пагинацией)
+- [ ] Расчёт 14-15 базовых индикаторов
+- [ ] Генерация меток с учётом волатильности
 - [ ] Проверка дисбаланса классов
-- [ ] Обучение XGBoost с базовыми параметрами
+- [ ] Обучение XGBoost с базовыми параметрами (с sample_weight)
 - [ ] Оптимизация гиперпараметров через Optuna
-- [ ] Walk-forward валидация с embargo
-- [ ] Out-of-sample тест на 2025-2026
-- [ ] Сравнение с бенчмарками (4 типа)
-- [ ] Статистическая проверка (t-статистика, p-value)
-- [ ] Генерация HTML отчета
+- [ ] Walk-forward валидация с embargo = 72
+- [ ] Бэктест с учётом перекрытия (non-overlapping)
+- [ ] Статистическая проверка с поправкой на автокорреляцию
+- [ ] Сравнение с бенчмарками (4 типа, правильно разделённые)
+- [ ] Анализ фандинга по сторонам
+- [ ] Генерация HTML отчёта
 - [ ] **РЕШЕНИЕ: есть ли альфа? (бинарное)**
 
 **Критерий перехода к Phase 1:**
-- Все три критерия успеха выполнены
+- Все критерии успеха выполнены
 - Статистическая значимость подтверждена
 - Модель лучше всех бенчмарков
+- Интерпретация: "FULL ALPHA" или хотя бы "TIMING + DIRECTION"
 
 ---
 
@@ -1676,18 +2067,22 @@ funding_cost = position_value × funding_rate × (holding_hours / 8)
 
 **Задачи:**
 - [ ] Расширение фичей (мульти-ТФ, рыночные данные)
+- [ ] Правильный мульти-ТФ через merge_asof
 - [ ] Ансамбль моделей
 - [ ] Калибровка вероятностей
 - [ ] Подбор порога по PR-кривой
 - [ ] Оптимизация ATR-based SL/TP
+- [ ] Проверка согласованности меток и стопов
 - [ ] Разработка exit policy
-- [ ] Финальный OOS тест
-- [ ] Генерация отчета
+- [ ] Мульти-актив валидация (обязательно)
+- [ ] Финальный OOS тест на OOS_FINAL
+- [ ] Генерация отчёта
 
 **Критерий перехода к Phase 2:**
 - Улучшение над Phase 0
 - Калиброванные вероятности
-- Подтвержденная альфа на ансамбле
+- Подтверждённая альфа на ансамбле
+- Мульти-актив валидация: падение < 50%
 
 ---
 
@@ -1696,7 +2091,8 @@ funding_cost = position_value × funding_rate × (holding_hours / 8)
 **Задачи:**
 - [ ] Bybit API интеграция (разделение источников)
 - [ ] Один процесс, одна модель, одна пара
-- [ ] Риск-менеджмент
+- [ ] Риск-менеджмент с дневными лимитами
+- [ ] Позиционный размер (volatility-adjusted)
 - [ ] Исполнение сделок на demo
 - [ ] Установка стопов на бирже (обязательно)
 - [ ] Мониторинг позиций
@@ -1723,7 +2119,7 @@ funding_cost = position_value × funding_rate × (holding_hours / 8)
 - [ ] Веб-управление привязками
 - [ ] Тестирование с 2-3 парами
 - [ ] Разработка retraining policy
-- [ ] Shadow testing
+- [ ] Shadow testing (6-8 недель)
 
 **Критерий перехода к Phase 4:**
 - Ансамбль лучше одиночной модели
@@ -1778,6 +2174,7 @@ xgboost>=2.0.0
 lightgbm>=4.0.0
 catboost>=1.2.0
 scikit-learn>=1.3.0
+statsmodels>=0.14.0          # Для Newey-West
 
 # Оптимизация
 optuna>=3.4.0
@@ -1814,40 +2211,32 @@ pytest-asyncio>=0.21.0
 
 2. **МАКС бот** — токен и формат сообщений. Будет сделано в самом конце.
 
-3. **Трансформер** — решение о использовании принимается ТОЛЬКО после того, как дерево покажет альфу. Если XGBoost не дает сигнал — трансформер не поможет.
+3. **Трансформер** — решение о использовании принимается ТОЛЬКО после того, как дерево покажет альфу. Если XGBoost не даёт сигнал — трансформер не поможет.
 
 4. **Оптимизация на C** — решение принимается после профилирования узких мест.
 
 5. **Дополнительные пары** — добавляются инкрементально, после проверки сигнала на каждой.
 
-6. **Мульти-актив валидация** — опциональный тест в Phase 1. Обучить на SOL, проверить на ETH/BTC без переобучения. Если работает — фичи универсальны.
-
 ---
 
 ## ✅ ИТОГОВАЯ СВОДКА
 
-### Что изменилось в версии 3.0:
+### Что изменилось в версии 4.2:
 
-| Аспект | Было (v2.0) | Стало (v3.0) |
+| Аспект | Было (v4.0) | Стало (v4.2) |
 |--------|-------------|--------------|
-| **Критерии успеха** | 7 условий | Бинарное правило + 3 критерия |
-| **Статистика** | Только Sharpe | t-статистика, p-value, CI |
-| **Бенчмарки** | 3 типа | 4 типа (добавлены перемешанные метки) |
-| **Порог уверенности** | 0.70 (с потолка) | По PR-кривой |
-| **Стопы** | 2%/4% (с потолка) | ATR-based с grid search |
-| **Реалтайм данные** | Не разделены | Явное разделение источников |
-| **Позиции** | Не защищена | Защита на уровне биржи |
-| **Веб-дашборд** | С начала | С фазы 2 |
-| **Дашборд в фазе 0** | Был | Убран (только HTML отчет) |
-| **Оптимизация гиперпараметров** | Не было | Обязательно (Optuna) |
-| **Exit policy** | Не было | Добавлено |
-| **Retraining policy** | Не было | Добавлено |
-| **Funding fees** | Не было | Добавлено |
-| **Дрейф данных** | Не было | Добавлено |
-| **Периодическая сверка** | Только на старте | Каждый час |
-| **Дисбаланс классов** | Не учитывался | Проверяется и корректируется |
-| **Директор** | Не был явно указан | Маленький MLP, НЕ Laya |
-| **Timeline** | 4-6 месяцев | 5-7 месяцев (честнее) |
+| **t-статистика** | Без поправки | С поправкой на автокорреляцию |
+| **Бэктест** | С перекрытием | Non-overlapping |
+| **Embargo** | 24 бара | 72 бара |
+| **Защита OOS_FINAL** | Декларация | Физическая + хеш + флаг |
+| **Противоречие** | Было | Устранено |
+| **Код-баг** | Был | Исправлен (sample_weight) |
+| **Вход** | Лонг-онли | Симметричный (лонг + шорт) |
+| **Метки и стопы** | Не согласованы | Проверка согласованности |
+| **Час дня** | Обязательный | Опциональный |
+| **Дневной сброс** | Не определён | Зафиксирован в UTC |
+| **Пере-калибровка** | Не согласована | Согласована с retraining |
+| **Бенчмарк SMA** | По return | По Sharpe |
 
 ### Ключевые принципы (неизменны):
 
@@ -1858,6 +2247,7 @@ pytest-asyncio>=0.21.0
 5. **Калибровка** — вероятности должны быть честными
 6. **Обработка ошибок** — пауза, НЕ закрытие позиций
 7. **Статистическая значимость** — без неё нет доверия к результатам
+8. **Симметричный вход** — лонг и шорт для баланса фандинга
 
 ---
 
@@ -1874,10 +2264,16 @@ pytest-asyncio>=0.21.0
 - Все 4 критичных пункта интегрированы
 - 3 мелочи учтены
 
+**Третья модель (финальная):**
+- Все 3 критичных пункта интегрированы
+- 5 мелочей учтены
+- 1 код-баг исправлен
+- 1 противоречие устранено
+
 ### Что осталось неинтегрированным:
 
-1. **Дашборд в фазе 0** — заменен на HTML отчет (по мнению второй модели)
-2. **Мульти-актив валидация** — опционально, не обязательный критерий
+1. **Дашборд в фазе 0** — заменён на HTML отчёт
+2. **Мульти-актив валидация** — обязательная в фазе 1
 3. **Режимы рынка** — как рекомендация, не как обязательный элемент
 
 ---
@@ -1886,17 +2282,18 @@ pytest-asyncio>=0.21.0
 
 Документ готов к реализации. Предлагаю начать с **фазы 0**, которая включает:
 
-1. Сбор данных с mainnet
-2. Расчет 15 фичей
-3. Обучение и оптимизация
-4. Валидация и бенчмарки
-5. Статистическая проверка
-6. Бинарное решение: **идти дальше или закрыть проект**
+1. Сбор данных с mainnet (SOL/USDT 1h + funding)
+2. Расчёт 14-15 фичей с правильным мульти-ТФ через `merge_asof`
+3. Обучение и оптимизация через Optuna
+4. Бэктест с учётом перекрытия
+5. Статистическая проверка с поправкой на автокорреляцию
+6. Бенчмарки (4 типа, правильно разделённые)
+7. Бинарное решение: **идти дальше или закрыть проект**
 
-Это самый честный и экономный путь. Если альфы нет — мы узнаем за 3-4 недели. Если есть — строим систему вокруг подтвержденного сигнала.
+Если альфы нет — узнаем за 3-4 недели. Если есть — строим систему вокруг подтверждённого сигнала.
 
 ---
 
-**Документ готов для ревью.**
+**Документ версии 4.2 готов для ревью и реализации.**
 
-Жду обратной связи по любым разделам.
+Это финальная версия. Дальнейшие итерации без реальных данных фазы 0 дадут убывающую отдачу. Следующий шаг — написание кода.
