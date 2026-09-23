@@ -44,7 +44,8 @@ CFG = load_config()
 DATA_DIR = Path("data")
 FEATURE_FILE = DATA_DIR / "features" / "dataset.parquet"
 SYM = CFG["data"]["bybit_symbol"]
-FUNDING_FILE = DATA_DIR / "funding_rates" / f"{SYM}_USDT" / "funding_history.parquet"
+_sym_base = SYM[:-4] if str(SYM).upper().endswith("USDT") else SYM
+FUNDING_FILE = DATA_DIR / "funding_rates" / f"{_sym_base}_USDT" / "funding_history.parquet"
 
 FEE = CFG["costs"]["taker_fee"]
 SLIP = CFG["costs"]["slippage"]
@@ -112,8 +113,10 @@ def backtest_kwargs(df: pd.DataFrame, funding_aligned: np.ndarray | None) -> dic
 def make_model(params: dict) -> xgb.XGBClassifier:
     p = dict(params)
     p.setdefault("random_state", 42)  # воспроизводимость даже после Optuna
+    # XGBoost>=3.x: early stopping передаётся в конструктор, eval_set — в fit
     return xgb.XGBClassifier(**p, objective="multi:softprob", num_class=3,
-                             eval_metric="mlogloss", tree_method="hist", n_jobs=-1)
+                             eval_metric="mlogloss", tree_method="hist", n_jobs=-1,
+                             early_stopping_rounds=EARLY_STOP)
 
 
 def encode_y(y: pd.Series) -> np.ndarray:
@@ -127,8 +130,7 @@ def decode_pred(p: np.ndarray) -> np.ndarray:
 def train_and_predict(X_tr, y_tr, X_ev, y_ev, params):
     model = make_model(params)
     sw = compute_sample_weight("balanced", y_tr)
-    model.fit(X_tr, y_tr, sample_weight=sw, eval_set=[(X_ev, y_ev)],
-              early_stopping_rounds=EARLY_STOP, verbose=False)
+    model.fit(X_tr, y_tr, sample_weight=sw, eval_set=[(X_ev, y_ev)], verbose=False)
     return model
 
 
@@ -238,8 +240,10 @@ def kill_criteria(oos_metrics: dict, rets_model: np.ndarray, rets_bh: np.ndarray
         checks["wf_cv_lt_0_5"] = False
 
     # вклад фичи: gain (реальный вклад), а не number of splits
-    imp = model.get_booster().feature_importances(importance_type="gain")
-    top_share = float(imp.max() / imp.sum()) if imp.sum() else 1.0
+    # xgboost>=3.x: Booster.get_score(importance_type="gain") вернул dict {fname: gain}
+    score = model.get_booster().get_score(importance_type="gain")
+    gains = np.fromiter(score.values(), dtype=float) if score else np.array([0.0])
+    top_share = float(gains.max() / gains.sum()) if gains.sum() else 1.0
     checks["no_dominant_feature"] = top_share <= 0.90
     checks["alpha_interpretation"] = bm["interpretation"].startswith(("FULL", "TIMING", "DIRECTION")) \
         and not bm["interpretation"].startswith("NO ALPHA")
@@ -249,7 +253,7 @@ def kill_criteria(oos_metrics: dict, rets_model: np.ndarray, rets_bh: np.ndarray
             "failed": [k for k, v in checks.items() if not v],
             "sharpe_pb_model": sh_pb, "sharpe_pb_buyhold": sh_bh, "sharpe_pb_sma": sh_sma,
             "maxdd_model": dd_mod, "maxdd_buyhold": dd_bh, "info_ratio": ir,
-            "wf_cv": cv, "top_feature_share": top_share}
+            "wf_cv": cv, "top_feature_share": top_share, "gain": score}
 
 
 # ───────────────────────── main ─────────────────────────
@@ -337,7 +341,7 @@ def main():
     rets_sma = returns_from_trades(sma_trades, len(oos))
     rets_bh = returns_from_buyhold(oos, FEE, SLIP)
 
-    print("\n[KILL CRITERIA → вердикт]")
+    print("\n[KILL CRITERIA -> вердикт]")
     verdict = kill_criteria(m, rets_model, rets_bh, rets_sma, wf, bm, model)
     print(f"  IR={verdict['info_ratio']:.2f} | доминантная фича "
           f"{verdict['top_feature_share']:.1%} | CV(folds)={verdict['wf_cv']}")
@@ -359,9 +363,7 @@ def main():
         "bench3_dist_sample": _sample(bm["_raw_b3"]),
         "kill_criteria": verdict,
         "funding_by_side": m["funding_by_side"],
-        "feature_importance_gain": dict(zip(
-            FEATURE_COLUMNS,
-            map(float, model.get_booster().feature_importances(importance_type="gain")))),
+        "feature_importance_gain": {f: float(verdict["gain"].get(f, 0.0)) for f in FEATURE_COLUMNS},
     }
     Path("backtests/reports").mkdir(parents=True, exist_ok=True)
     path = f"backtests/reports/phase0_{pd.Timestamp.now(tz='UTC'):%Y-%m-%d}.json"

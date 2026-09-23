@@ -27,3 +27,16 @@
 - ПРОВЕРЕНО: py_compile всех 8 модулей; smoke-тест ядра бэктеста/бенчмарков на синтетике; загрузка конфига; генерация HTML.
 СЛЕДУЮЩИЕ ШАГИ: 1) pip install -r requirements.txt на целевом железе; 2) run_phase0.py --quick → report.py;
   3) полный прогон (Optuna 40+) → вердикт GO/NO-GO из logs/phase0_run.log; 4) при GO — Phase 1.
+
+[2026-09-24] Прогон Phase 0 на реальных данных (локальный Windows, Python 3.14.5).
+- Данные собраны data_collector.py: SOL 1h (41447) + 4h (10362) + funding (5401) 2022-01→2026-09.
+- Датасет: 41423 строки, классы {hold .509, short .250, long .242}, 2022-01-02 .. 2026-09-23.
+- Фиксы при прогоне: (а) XGBoost>=3.x — `early_stopping_rounds` и `eval_metric` в конструктор, `fit()` их не принимает; (б) `Booster.feature_importances` удалён → `get_score(importance_type="gain")` (dict); (в) pandas merge_asof: правый/левый keys в разных units (ms vs us) → нормализация через `datetime64[ns]` + int64; (г) `data/features` не существовал → mkdir; (д) кодировка консоли cp1251 → PYTHONUTF8=1; (е) funding-путь нормализован под SOL_USDT.
+- quick-прогон: пайплайн живой end-to-end (бэктест 464 сделки, ATR-выходы 185/464).
+- ПОЛНЫЙ ПРОГОН (Optuna 40 trials, bench 150×2): best val_sharpe=0.121 (max_depth 8, lr .017).
+  OOS_ITERATIVE: 481 сделок, ret=-83.08%, sharpe_pb=-1.47, MaxDD=86.9%, NW t=-1.83 p=.067, bootstrap p=.956.
+  Бенчмарки: B&H -56.32% (sharpe_pb -0.41), B2 -78.1% (pct 51.3), B3 -80.7% (pct 53.3), B4 SMA -59.5%.
+  kill_criteria: IR=-0.68, domin. feature 12.3%, wf CV=0.61. >> ВЕРДИКТ: NO-GO <<
+- Среда критична: OOS (2025-01→2026-02) — жёсткий медвежий рынок, SOL 192→84 (-56%). Модель хуже B&H,
+  хуже случайности — по разделу 3.11 это стоп/переработка фич, НЕ переход к Phase 1.
+- Артефакты: backtests/reports/phase0_2026-09-23.html (+.json).

@@ -127,8 +127,8 @@ if __name__ == "__main__":
                   else pd.Timestamp.now(tz="UTC")).timestamp() * 1000)
 
     root = Path(args.outdir)
-    # нормализуем символ: "SOLUSDT" -> "SOL_USDT" (раньше выходило "SOLUSDT_USDT")
-    base = args.symbol[:-5] if args.symbol.upper().endswith("USDT") else args.symbol
+    # нормализуем символ: "SOLUSDT" -> "SOL_USDT" ([:-4] режет ровно суффикс "USDT")
+    base = args.symbol[:-4] if args.symbol.upper().endswith("USDT") else args.symbol
     sym = f"{base}_USDT"
     bybit_sym = args.symbol.upper()
 

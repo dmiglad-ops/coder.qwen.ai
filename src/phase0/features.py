@@ -123,6 +123,7 @@ def merge_multitimeframe_correctly(df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> 
     Это исключает look-ahead.
     """
     right = df_4h.copy()
+    right["timestamp"] = pd.to_datetime(right["timestamp"], utc=True)
     right["close_time"] = right["timestamp"] + pd.Timedelta(hours=4)
     right = right.sort_values("close_time")
     # сила тренда на 4h: расстояние EMA20 к EMA50 в единицах ATR-4h
@@ -131,14 +132,24 @@ def merge_multitimeframe_correctly(df_1h: pd.DataFrame, df_4h: pd.DataFrame) -> 
     right["atr_4h"] = atr(right)
     right["trend_strength_4h"] = (right["ema_20_4h"] - right["ema_50_4h"]) / right["atr_4h"]
 
-    left = df_1h.sort_values("timestamp")
+    left = df_1h.sort_values("timestamp").copy()
+    left_key = (left["timestamp"].dt.tz_convert("UTC").dt.tz_localize(None)
+                .astype("datetime64[ns]").astype("int64").rename("close_time"))
+    right_key = (right["close_time"].dt.tz_convert("UTC").dt.tz_localize(None)
+                 .astype("datetime64[ns]").astype("int64"))
+    left_out = left.drop(columns=["timestamp"])
+    left_out["close_time"] = left_key.reset_index(drop=True)
+    right_out = right[["close_time", "trend_strength_4h"]]
+    right_out["close_time"] = right_key.reset_index(drop=True)
+
     merged = pd.merge_asof(
-        left,
-        right[["close_time", "trend_strength_4h"]].rename(columns={"close_time": "timestamp"}),
-        on="timestamp",
+        left_out,
+        right_out,
+        on="close_time",
         direction="backward",
         allow_exact_matches=False,  # закрытие 4h ровно в момент 1h-свечи = свеча ещё не закрыта
     )
+    merged["timestamp"] = pd.to_datetime(left["timestamp"].reset_index(drop=True))
     return merged
 
 
